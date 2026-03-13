@@ -1,0 +1,56 @@
+# Those Days · VRChat Memorial
+
+> 欢迎来到“那些日子”——一个记录 VRChat 珍贵回忆的纪念站点。
+
+!\[Those Days]\(https\://img.shields.io/badge/VRChat-Memorial-5ba8a0?style=for-the-badge\&logo=vrchat\&logoColor=white null)
+!\[Status]\(https\://img.shields.io/badge/Status-Early\_Access-orange?style=for-the-badge null)
+
+## 📖 项目简介
+
+这是一个关于 VRChat 经历与回忆的纪念网站。目前处于早期开发阶段，主要作为一个入口展示页。网站采用了独特的视觉设计，旨在营造一种怀旧与温馨的氛围。
+
+### 当前功能
+
+- **沉浸式首页**：包含动态背景与精美的 UI 设计。
+- **双重身份入口**：
+  - **现实旅人**：跳转至个人博客 (<https://www.kozakemi.top)。>
+  - **VRC住民**：专为 VRChat 好友设计的入口（开发中）。
+- **移动端适配**：响应式布局，支持不同设备访问。
+
+## 🛠️ 技术栈
+
+目前项目为静态页面，未来计划迁移至现代前端框架：
+
+- **当前**：HTML5, CSS3 (Flexbox/Grid), GitHub Pages
+- **计划**：React.js / Next.js
+- **安全**：好友隐私数据将采用 AES-256-GCM 加密存储
+
+## 🚀 部署
+
+本项目使用 GitHub Actions 自动部署至 GitHub Pages。
+
+- **分支**：`main`
+- **自动构建**：每次 push 到 main 分支时自动触发构建与部署。
+
+## 📅 开发计划
+
+- [x] 静态首页搭建
+- [x] GitHub Pages 自动部署配置
+- [ ] 使用 React 框架
+- [ ] 实现 VRChat 好友专属登录/解密功能
+- [ ] 增加相册与回忆录板块
+
+## 📄 许可证与版权说明
+
+### 1. 代码许可
+本项目代码部分采用 [MIT License](LICENSE) 授权。您可以自由地使用、复制、修改、合并、出版发行、散布、再授权及贩售本软件的副本。
+
+### 2. 资源版权
+本项目中使用的**所有图片、音频及视频资源**（包括但不限于背景图、图标、照片等）**不适用**于 MIT 许可证。这些资源的版权归原作者所有，保留所有权利。未经明确书面许可，请勿擅自提取使用。
+
+### 3. VRChat 免责声明
+本项目部分界面设计灵感来源于 **VRChat**，旨在致敬该平台带来的美好回忆。
+- 本项目与 VRChat Inc. 无任何官方关联。
+- "VRChat" 是 VRChat Inc. 的注册商标。
+- 本项目不主张任何关于 VRChat 品牌资产的权利，亦无意侵犯 VRChat 的版权或商标权。
+- 如有任何侵权疑虑，请联系作者进行处理。
