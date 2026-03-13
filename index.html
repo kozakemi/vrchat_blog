@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Those Days · VRChat Memorial</title>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Noto+Sans+SC:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Nunito', 'Noto Sans SC', sans-serif;
+    background: #3d5159;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse 70% 60% at 30% 40%, rgba(255,255,255,0.03) 0%, transparent 60%),
+      radial-gradient(ellipse 50% 50% at 75% 65%, rgba(0,0,0,0.15) 0%, transparent 55%);
+    pointer-events: none;
+  }
+
+  /* Early Access 侧边标签 */
+  .early-access {
+    position: fixed;
+    right: 0; top: 50%;
+    transform: translateY(-50%);
+    z-index: 20;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+  }
+  .early-access-inner {
+    border: 2px solid #5ba8a0;
+    border-radius: 6px;
+    padding: 14px 7px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #5ba8a0;
+    letter-spacing: 3px;
+    font-style: italic;
+    white-space: nowrap;
+  }
+
+  /* About Us 顶部按钮 */
+  .top-bar {
+    position: fixed;
+    top: 24px; left: 50%; transform: translateX(-50%);
+    z-index: 20;
+  }
+  .btn-about {
+    background: transparent;
+    border: 1.5px solid #5ba8a0;
+    border-radius: 6px;
+    padding: 7px 24px;
+    font-size: 13px;
+    font-family: 'Nunito', sans-serif;
+    font-weight: 600;
+    color: #c8dedd;
+    cursor: default;
+    letter-spacing: 0.3px;
+  }
+
+  /* 主内容区 */
+  .main {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    animation: fadeIn .8s ease both;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .welcome-text {
+    font-size: 38px;
+    font-weight: 700;
+    color: #e8f0ef;
+    letter-spacing: 0.3px;
+    margin-bottom: 20px;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.25);
+  }
+
+  /* Those Days Logo 气泡 */
+  .logo-bubble {
+    position: relative;
+    display: inline-block;
+    margin-bottom: 50px;
+  }
+
+  .logo-box {
+    display: inline-flex;
+    align-items: center;
+    border: 2.5px solid #fff;
+    border-radius: 10px;
+    padding: 10px 20px 10px 20px;
+    gap: 10px;
+  }
+
+  .logo-those {
+    font-size: 36px;
+    font-weight: 800;
+    color: #e8f0ef;
+    letter-spacing: 2px;
+  }
+
+  .logo-days-wrap {
+    background: #fff;
+    border-radius: 6px;
+    padding: 3px 12px;
+  }
+
+  .logo-days {
+    font-size: 36px;
+    font-weight: 800;
+    color: #3d5159;
+    letter-spacing: 2px;
+  }
+
+  /* 气泡小三角 */
+  .logo-bubble::after {
+    content: '';
+    position: absolute;
+    bottom: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 11px solid transparent;
+    border-right: 11px solid transparent;
+    border-top: 16px solid #fff;
+  }
+
+  .login-label {
+    font-size: 14px;
+    font-weight: 400;
+    color: #9abfbb;
+    letter-spacing: 0.5px;
+    margin-bottom: 16px;
+  }
+
+  /* 两个大按钮 */
+  .btn-row {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 22px;
+  }
+
+  .btn-login {
+    width: 196px;
+    padding: 26px 16px;
+    background: transparent;
+    border: 2px solid #5ba8a0;
+    border-radius: 10px;
+    font-family: 'Nunito', 'Noto Sans SC', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: #d4eae8;
+    cursor: default;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    transition: background .2s, border-color .2s;
+  }
+
+  .btn-login:hover {
+    background: rgba(91,168,160,0.12);
+    border-color: #7dcfc7;
+  }
+
+  .or-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #7aada8;
+    letter-spacing: 3px;
+    margin-bottom: 18px;
+  }
+
+  .btn-create {
+    padding: 14px 40px;
+    background: transparent;
+    border: 2px solid #5ba8a0;
+    border-radius: 10px;
+    font-family: 'Nunito', 'Noto Sans SC', sans-serif;
+    font-size: 13px;
+    font-weight: 800;
+    color: #5ba8a0;
+    cursor: default;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: all .2s;
+  }
+
+  .btn-create .arrow {
+    font-size: 15px; font-weight: 400;
+    transition: transform .2s;
+  }
+
+  .btn-create:hover {
+    background: rgba(91,168,160,0.1);
+    color: #7dcfc7;
+    border-color: #7dcfc7;
+  }
+  .btn-create:hover .arrow { transform: translateX(4px); }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <button class="btn-about">About Us</button>
+</div>
+
+<div class="early-access">
+  <div class="early-access-inner">Early Access</div>
+</div>
+
+<div class="main">
+  <div class="welcome-text">Welcome to the world of</div>
+
+  <div class="logo-bubble">
+    <div class="logo-box">
+      <span class="logo-those">THOSE</span>
+      <div class="logo-days-wrap"><span class="logo-days">DAYS</span></div>
+    </div>
+  </div>
+
+  <div class="login-label">Login with</div>
+
+  <div class="btn-row">
+    <a class="btn-login" href="https://www.kozakemi.top" target="_blank" rel="noopener noreferrer">现实旅人</a>
+    <button class="btn-login">VRC住民</button>
+  </div>
+
+  <div class="or-label">OR</div>
+
+  <button class="btn-create">CREATE ACCOUNT <span class="arrow">→</span></button>
+</div>
+
+</body>
+</html>
