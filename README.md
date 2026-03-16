@@ -1,57 +1,54 @@
-# React + TypeScript + Vite
+# Those Days · VRChat Memorial
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+> 欢迎来到“那些日子”——一个记录 VRChat 珍贵回忆的纪念站点。
 
-Currently, two official plugins are available:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 📖 项目简介
 
-## Expanding the ESLint configuration
+这是一个关于 VRChat 经历与回忆的纪念网站。目前处于早期开发阶段，主要作为一个入口展示页。网站采用了独特的视觉设计，旨在营造一种怀旧与温馨的氛围。
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### 当前功能
 
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
-```
+- **沉浸式首页**：包含动态背景与精美的 UI 设计。
+- **双重身份入口**：
+  - **现实旅人**：跳转至个人博客 (<https://www.kozakemi.top)。>
+  - **VRC住民**：专为 VRChat 好友设计的入口（开发中）。
+- **移动端适配**：响应式布局，支持不同设备访问。
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 🛠️ 技术栈
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+目前项目为静态页面，未来计划迁移至现代前端框架：
 
-export default tseslint.config({
-  extends: [
-    // other configs...
-    // Enable lint rules for React
-    reactX.configs['recommended-typescript'],
-    // Enable lint rules for React DOM
-    reactDom.configs.recommended,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
-```
+- **当前**：HTML5, CSS3 (Flexbox/Grid), GitHub Pages
+- **计划**：React.js / Next.js
+- **安全**：好友隐私数据将采用 AES-256-GCM 加密存储
+
+## 🚀 部署
+
+本项目使用 GitHub Actions 自动部署至 GitHub Pages。
+
+- **分支**：`main`
+- **自动构建**：每次 push 到 main 分支时自动触发构建与部署。
+
+## 📅 开发计划
+
+- [x] 静态首页搭建
+- [x] GitHub Pages 自动部署配置
+- [ ] 使用 React 框架
+- [ ] 实现 VRChat 好友专属登录/解密功能
+- [ ] 增加相册与回忆录板块
+
+## 📄 许可证与版权说明
+
+### 1. 代码许可
+本项目代码部分采用 [MIT License](LICENSE) 授权。您可以自由地使用、复制、修改、合并、出版发行、散布、再授权及贩售本软件的副本。
+
+### 2. 资源版权
+本项目中使用的**所有图片、音频及视频资源**（包括但不限于背景图、图标、照片等）**不适用**于 MIT 许可证。这些资源的版权归原作者所有，保留所有权利。未经明确书面许可，请勿擅自提取使用。
+
+### 3. VRChat 免责声明
+本项目部分界面设计灵感来源于 **VRChat**，旨在致敬该平台带来的美好回忆。
+- 本项目与 VRChat Inc. 无任何官方关联。
+- "VRChat" 是 VRChat Inc. 的注册商标。
+- 本项目不主张任何关于 VRChat 品牌资产的权利，亦无意侵犯 VRChat 的版权或商标权。
+- 如有任何侵权疑虑，请联系作者进行处理。
