@@ -24,6 +24,15 @@ type AuthState =
   | { status: "authed"; mode: "key" }
   | { status: "authed"; mode: "guest"; nickname: string };
 
+type LoginEffectState =
+  | {
+      mode: LoginMode;
+      accountLabel: string;
+    }
+  | null;
+
+type JoinStatus = "connecting" | "joining";
+
 const STORAGE_AUTH_MODE_KEY = "td_auth_mode";
 const STORAGE_GUEST_NICKNAME_KEY = "td_guest_nickname";
 
@@ -48,7 +57,7 @@ function clearAuthPersistence() {
 
 export default function Home() {
   const { t } = useTranslation();
-  const [view, setView] = useState<"home" | "login" | "authed">("home");
+  const [view, setView] = useState<"home" | "login" | "authed" | "joining" | "gallery">("home");
   const [auth, setAuth] = useState<AuthState>(() => loadAuthState());
   const [loginMode, setLoginMode] = useState<LoginMode>("key");
   const [keyFile, setKeyFile] = useState<File | null>(null);
@@ -57,6 +66,10 @@ export default function Home() {
     return saved ?? "";
   });
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [loginEffect, setLoginEffect] = useState<LoginEffectState>(null);
+  const [loginProgress, setLoginProgress] = useState(0);
+  const [joinStatus, setJoinStatus] = useState<JoinStatus>("connecting");
+  const [joinAccountLabel, setJoinAccountLabel] = useState<string>("");
   const sceneRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const keyInputRef = useRef<HTMLInputElement | null>(null);
@@ -139,201 +152,372 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isHelpOpen]);
 
+  useEffect(() => {
+    if (!loginEffect) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setLoginProgress(1);
+      return;
+    }
+
+    let rafId = 0;
+    const startAt = performance.now();
+    const durationMs = 2400;
+
+    const tick = (now: number) => {
+      const t01 = Math.min(1, (now - startAt) / durationMs);
+      const eased = 1 - Math.pow(1 - t01, 3);
+      setLoginProgress(eased);
+      if (t01 < 1) rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [loginEffect]);
+
+  useEffect(() => {
+    if (!loginEffect) return;
+    if (loginProgress < 1) return;
+
+    if (loginEffect.mode === "key") {
+      setAuth({ status: "authed", mode: "key" });
+      clearAuthPersistence();
+    } else {
+      const nickname = loginEffect.accountLabel;
+      persistGuest(nickname);
+      setAuth({ status: "authed", mode: "guest", nickname });
+    }
+
+    setJoinAccountLabel(loginEffect.accountLabel);
+    setJoinStatus("connecting");
+    setView("joining");
+    setLoginEffect(null);
+  }, [loginEffect, loginProgress]);
+
+  useEffect(() => {
+    if (!loginEffect) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setLoginEffect(null);
+      setLoginProgress(0);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [loginEffect]);
+
+  useEffect(() => {
+    if (view !== "joining") return;
+
+    setJoinStatus("connecting");
+    const t1 = window.setTimeout(() => setJoinStatus("joining"), 1400);
+    const t2 = window.setTimeout(() => setView("gallery"), 2600);
+
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [view]);
+
+  if (view === "joining" || view === "gallery") {
+    return (
+      <div className="fullscreen">
+        <div className="fullscreen-content">
+          {view === "joining" ? (
+            <div className="join-screen" role="status" aria-live="polite">
+              <div className="join-preview" aria-hidden="true" />
+              <div className="join-status">
+                <div className="join-status-text">
+                  {joinStatus === "connecting" ? t("connecting") : t("joining")}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="gallery">
+              <div className="gallery-header">
+                <div className="gallery-title">{t("galleryTitle")}</div>
+                <button
+                  className="gallery-back"
+                  type="button"
+                  onClick={() => {
+                    setView("home");
+                  }}
+                >
+                  {t("back")}
+                </button>
+              </div>
+              <div className="gallery-grid">
+                {Array.from({ length: 9 }).map((_, index) => (
+                  <div className="gallery-item" key={index}>
+                    <div className="gallery-thumb" aria-hidden="true" />
+                    <div className="gallery-caption">
+                      {t("galleryItem", { index: String(index + 1).padStart(2, "0") })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="scene" ref={sceneRef}>
       <div className="panel" ref={panelRef} role="region" aria-label="Login panel">
-        <button className="btn-about" type="button">
-          {t("aboutUs")}
-        </button>
+        {!loginEffect && view === "home" ? (
+          <>
+            <button className="btn-about" type="button">
+              {t("aboutUs")}
+            </button>
 
-        <div className="early-access" aria-hidden="true">
-          <div className="early-access-inner">Early Access</div>
-        </div>
+            <div className="early-access" aria-hidden="true">
+              <div className="early-access-inner">Early Access</div>
+            </div>
+          </>
+        ) : null}
 
         <div className="panel-content">
-          <div className="welcome-text">{t("welcome")}</div>
-
-          <div className="logo-bubble" aria-label="Those Days logo">
-            <div className="logo-box">
-              <span className="logo-those">THOSE</span>
-              <div className="logo-days-wrap">
-                <span className="logo-days">DAYS</span>
-              </div>
-            </div>
-          </div>
-
-          {view === "home" ? (
-            <>
-              <div className="login-label">Login with</div>
-
-              <div className="btn-row">
-                <a
-                  className="btn-login"
-                  href="https://www.kozakemi.top"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {t("traveler")}
-                </a>
-                <button
-                  className="btn-login"
-                  type="button"
-                  onClick={() => {
-                    setView("login");
-                  }}
-                >
-                  {t("vrcResident")}
-                </button>
-              </div>
-
-              <div className="or-label">OR</div>
-
-              <button className="btn-create" type="button" disabled>
-                {t("createAccount")}
-              </button>
-            </>
-          ) : view === "login" ? (
-            <div className="login-card" role="group" aria-label="Login form">
-              <div className="login-card-header">{t("login")}</div>
-              <div className="login-card-body">
-                <div className="login-mode-row" role="tablist" aria-label="Login mode">
-                  <button
-                    className={loginMode === "key" ? "login-mode login-mode-active" : "login-mode"}
-                    type="button"
-                    onClick={() => setLoginMode("key")}
-                    role="tab"
-                    aria-selected={loginMode === "key"}
-                  >
-                    {t("keyLogin")}
-                  </button>
-                  <button
-                    className={loginMode === "guest" ? "login-mode login-mode-active" : "login-mode"}
-                    type="button"
-                    onClick={() => setLoginMode("guest")}
-                    role="tab"
-                    aria-selected={loginMode === "guest"}
-                  >
-                    {t("guestLogin")}
-                  </button>
-                </div>
-
-                {loginMode === "key" ? (
-                  <>
-                    <input
-                      ref={keyInputRef}
-                      className="login-file-input"
-                      type="file"
-                      onChange={(e) => {
-                        setKeyFile(e.currentTarget.files?.[0] ?? null);
-                      }}
+          {loginEffect ? (
+            <div className="login-effect-backdrop" role="presentation">
+              <div
+                className="login-effect"
+                role="dialog"
+                aria-modal="true"
+                aria-label={t("loggingInTitle")}
+                style={{
+                  ["--progress" as never]: `${Math.round(loginProgress * 100)}`,
+                }}
+              >
+                <div className="login-effect-ring" aria-hidden="true" />
+                <div className="login-effect-inner">
+                  <div className="login-effect-corners">
+                    <span>0%</span>
+                    <span>100%</span>
+                  </div>
+                  <svg className="login-effect-wave" viewBox="0 0 240 44" aria-hidden="true">
+                    <path
+                      d="M0 22 C 16 10, 28 10, 44 22 S 72 34, 88 22 S 116 10, 132 22 S 160 34, 176 22 S 204 10, 220 22 S 232 34, 240 22"
+                      fill="none"
+                      stroke="rgba(255,255,255,0.72)"
+                      strokeWidth="3"
+                      strokeLinecap="round"
                     />
-                    <button
-                      className="login-file-button"
-                      type="button"
-                      onClick={() => keyInputRef.current?.click()}
-                    >
-                      {t("importKey")}
-                    </button>
-                    {keyFile ? (
-                      <div className="login-hint">
-                        {t("keySelected")}: {keyFile.name}
-                      </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <input
-                      className="login-input"
-                      type="text"
-                      placeholder={t("nicknamePlaceholder")}
-                      value={guestNickname}
-                      onChange={(e) => setGuestNickname(e.currentTarget.value)}
-                      maxLength={24}
-                      autoComplete="nickname"
-                    />
-                  </>
-                )}
-
-                <div className="login-actions">
+                  </svg>
+                  <div className="login-effect-title">{t("loggingInTitle")}</div>
+                  <div className="login-effect-subtitle">
+                    {loginEffect.mode === "key"
+                      ? t("loggingInWithKey", { account: loginEffect.accountLabel })
+                      : t("loggingInWithGuest", { account: loginEffect.accountLabel })}
+                  </div>
                   <button
-                    className="login-action"
+                    className="login-effect-cancel"
                     type="button"
                     onClick={() => {
-                      setView("home");
-                      setKeyFile(null);
-                      setIsHelpOpen(false);
+                      setLoginEffect(null);
+                      setLoginProgress(0);
                     }}
                   >
-                    {t("back")}
-                  </button>
-                  <button
-                    className="login-action"
-                    type="button"
-                    disabled={
-                      loginMode === "key" ? !keyFile : !guestNickname.trim()
-                    }
-                    onClick={() => {
-                      if (loginMode === "key") {
-                        setAuth({ status: "authed", mode: "key" });
-                        clearAuthPersistence();
-                        setView("authed");
-                        return;
-                      }
-
-                      const nickname = guestNickname.trim();
-                      if (!nickname) return;
-                      persistGuest(nickname);
-                      setAuth({ status: "authed", mode: "guest", nickname });
-                      setView("authed");
-                    }}
-                  >
-                    {t("done")}
+                    {t("cancel")}
                   </button>
                 </div>
               </div>
             </div>
           ) : (
-            <div className="login-card" role="group" aria-label="Login status">
-              <div className="login-card-header">{t("login")}</div>
-              <div className="login-card-body">
-                <div className="login-hint">
-                  {auth.status === "authed" && auth.mode === "key" ? t("loggedInAsKey") : null}
-                  {auth.status === "authed" && auth.mode === "guest" ? (
+            <>
+              {(
+                <>
+                  <div className="welcome-text">{t("welcome")}</div>
+
+                  <div className="logo-bubble" aria-label="Those Days logo">
+                    <div className="logo-box">
+                      <span className="logo-those">THOSE</span>
+                      <div className="logo-days-wrap">
+                        <span className="logo-days">DAYS</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {view === "home" ? (
                     <>
-                      {t("loggedInAsGuest")}: {auth.nickname}
+                      <div className="login-label">Login with</div>
+
+                      <div className="btn-row">
+                        <a
+                          className="btn-login"
+                          href="https://www.kozakemi.top"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {t("traveler")}
+                        </a>
+                        <button
+                          className="btn-login"
+                          type="button"
+                          onClick={() => {
+                            setView("login");
+                          }}
+                        >
+                          {t("vrcResident")}
+                        </button>
+                      </div>
+
+                      <div className="or-label">OR</div>
+
+                      <button className="btn-create" type="button" disabled>
+                        {t("createAccount")}
+                      </button>
                     </>
-                  ) : null}
-                </div>
-                <div className="login-actions">
-                  <button
-                    className="login-action"
-                    type="button"
-                    onClick={() => {
-                      setView("home");
-                      setIsHelpOpen(false);
-                    }}
-                  >
-                    {t("back")}
-                  </button>
-                  <button
-                    className="login-action"
-                    type="button"
-                    onClick={() => {
-                      setAuth({ status: "anonymous" });
-                      clearAuthPersistence();
-                      setKeyFile(null);
-                      setView("home");
-                    }}
-                  >
-                    {t("logout")}
-                  </button>
-                </div>
-              </div>
-            </div>
+                  ) : view === "login" ? (
+                    <div className="login-card" role="group" aria-label="Login form">
+                      <div className="login-card-header">{t("login")}</div>
+                      <div className="login-card-body">
+                        <div className="login-mode-row" role="tablist" aria-label="Login mode">
+                          <button
+                            className={
+                              loginMode === "key" ? "login-mode login-mode-active" : "login-mode"
+                            }
+                            type="button"
+                            onClick={() => setLoginMode("key")}
+                            role="tab"
+                            aria-selected={loginMode === "key"}
+                          >
+                            {t("keyLogin")}
+                          </button>
+                          <button
+                            className={
+                              loginMode === "guest"
+                                ? "login-mode login-mode-active"
+                                : "login-mode"
+                            }
+                            type="button"
+                            onClick={() => setLoginMode("guest")}
+                            role="tab"
+                            aria-selected={loginMode === "guest"}
+                          >
+                            {t("guestLogin")}
+                          </button>
+                        </div>
+
+                        {loginMode === "key" ? (
+                          <>
+                            <input
+                              ref={keyInputRef}
+                              className="login-file-input"
+                              type="file"
+                              onChange={(e) => {
+                                setKeyFile(e.currentTarget.files?.[0] ?? null);
+                              }}
+                            />
+                            <button
+                              className="login-file-button"
+                              type="button"
+                              onClick={() => keyInputRef.current?.click()}
+                            >
+                              {t("importKey")}
+                            </button>
+                            {keyFile ? (
+                              <div className="login-hint">
+                                {t("keySelected")}: {keyFile.name}
+                              </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <input
+                            className="login-input"
+                            type="text"
+                            placeholder={t("nicknamePlaceholder")}
+                            value={guestNickname}
+                            onChange={(e) => setGuestNickname(e.currentTarget.value)}
+                            maxLength={24}
+                            autoComplete="nickname"
+                          />
+                        )}
+
+                        <div className="login-actions">
+                          <button
+                            className="login-action"
+                            type="button"
+                            onClick={() => {
+                              setView("home");
+                              setKeyFile(null);
+                              setIsHelpOpen(false);
+                            }}
+                          >
+                            {t("back")}
+                          </button>
+                          <button
+                            className="login-action"
+                            type="button"
+                            disabled={loginMode === "key" ? !keyFile : !guestNickname.trim()}
+                            onClick={() => {
+                              if (loginMode === "key") {
+                                const name = keyFile ? keyFile.name : "Key";
+                                setLoginProgress(0);
+                                setLoginEffect({ mode: "key", accountLabel: name });
+                                return;
+                              }
+
+                              const nickname = guestNickname.trim();
+                              if (!nickname) return;
+                              setLoginProgress(0);
+                              setLoginEffect({ mode: "guest", accountLabel: nickname });
+                            }}
+                          >
+                            {t("done")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="login-card" role="group" aria-label="Login status">
+                      <div className="login-card-header">{t("login")}</div>
+                      <div className="login-card-body">
+                        <div className="login-hint">
+                          {auth.status === "authed" && auth.mode === "key"
+                            ? t("loggedInAsKey")
+                            : null}
+                          {auth.status === "authed" && auth.mode === "guest" ? (
+                            <>
+                              {t("loggedInAsGuest")}: {auth.nickname}
+                            </>
+                          ) : null}
+                        </div>
+                        <div className="login-actions">
+                          <button
+                            className="login-action"
+                            type="button"
+                            onClick={() => {
+                              setView("home");
+                              setIsHelpOpen(false);
+                            }}
+                          >
+                            {t("back")}
+                          </button>
+                          <button
+                            className="login-action"
+                            type="button"
+                            onClick={() => {
+                              setAuth({ status: "anonymous" });
+                              clearAuthPersistence();
+                              setKeyFile(null);
+                              setView("home");
+                            }}
+                          >
+                            {t("logout")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
           )}
         </div>
 
-        {view === "login" ? (
+        {view === "login" && !loginEffect ? (
           <button
             className="help-switch"
             type="button"
@@ -344,17 +528,19 @@ export default function Home() {
           </button>
         ) : null}
 
-        <button
-          className="lang-switch"
-          type="button"
-          onClick={() => {
-            const next = getNextLanguage(i18n.language);
-            void i18n.changeLanguage(next);
-            persistLanguage(next);
-          }}
-        >
-          {languageLabel}
-        </button>
+        {!loginEffect ? (
+          <button
+            className="lang-switch"
+            type="button"
+            onClick={() => {
+              const next = getNextLanguage(i18n.language);
+              void i18n.changeLanguage(next);
+              persistLanguage(next);
+            }}
+          >
+            {languageLabel}
+          </button>
+        ) : null}
       </div>
 
       {view === "login" && isHelpOpen
