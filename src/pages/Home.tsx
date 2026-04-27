@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import i18n, { persistLanguage } from "@/i18n";
 
@@ -57,7 +58,8 @@ function clearAuthPersistence() {
 
 export default function Home() {
   const { t } = useTranslation();
-  const [view, setView] = useState<"home" | "login" | "authed" | "joining" | "gallery">("home");
+  const navigate = useNavigate();
+  const [view, setView] = useState<"home" | "login" | "authed" | "joining">("home");
   const [auth, setAuth] = useState<AuthState>(() => loadAuthState());
   const [loginMode, setLoginMode] = useState<LoginMode>("key");
   const [keyFile, setKeyFile] = useState<File | null>(null);
@@ -211,53 +213,28 @@ export default function Home() {
 
     setJoinStatus("connecting");
     const t1 = window.setTimeout(() => setJoinStatus("joining"), 1400);
-    const t2 = window.setTimeout(() => setView("gallery"), 2600);
+    const t2 = window.setTimeout(() => {
+      navigate("/album");
+    }, 2600);
 
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
     };
-  }, [view]);
+  }, [navigate, view]);
 
-  if (view === "joining" || view === "gallery") {
+  if (view === "joining") {
     return (
       <div className="fullscreen">
         <div className="fullscreen-content">
-          {view === "joining" ? (
-            <div className="join-screen" role="status" aria-live="polite">
-              <div className="join-preview" aria-hidden="true" />
-              <div className="join-status">
-                <div className="join-status-text">
-                  {joinStatus === "connecting" ? t("connecting") : t("joining")}
-                </div>
+          <div className="join-screen" role="status" aria-live="polite">
+            <div className="join-preview" aria-hidden="true" />
+            <div className="join-status">
+              <div className="join-status-text">
+                {joinStatus === "connecting" ? t("connecting") : t("joining")}
               </div>
             </div>
-          ) : (
-            <div className="gallery">
-              <div className="gallery-header">
-                <div className="gallery-title">{t("galleryTitle")}</div>
-                <button
-                  className="gallery-back"
-                  type="button"
-                  onClick={() => {
-                    setView("home");
-                  }}
-                >
-                  {t("back")}
-                </button>
-              </div>
-              <div className="gallery-grid">
-                {Array.from({ length: 9 }).map((_, index) => (
-                  <div className="gallery-item" key={index}>
-                    <div className="gallery-thumb" aria-hidden="true" />
-                    <div className="gallery-caption">
-                      {t("galleryItem", { index: String(index + 1).padStart(2, "0") })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          </div>
         </div>
       </div>
     );
@@ -368,6 +345,7 @@ export default function Home() {
                       <button className="btn-create" type="button" disabled>
                         {t("createAccount")}
                       </button>
+
                     </>
                   ) : view === "login" ? (
                     <div className="login-card" role="group" aria-label="Login form">

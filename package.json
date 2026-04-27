@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "check": "tsc -b --noEmit"
+    "check": "tsc -b --noEmit",
+    "album:manifest": "node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --src-prefix ./VRChat"
   },
   "dependencies": {
     "@fontsource/nunito": "^5.2.7",
