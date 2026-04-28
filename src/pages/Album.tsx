@@ -21,6 +21,16 @@ const SIGN_ENDPOINT =
 
 const signedUrlCache = new Map<string, SignedUrlCacheEntry>();
 
+type BlobUrlCacheEntry = {
+  objectUrl: string;
+  createdAt: number;
+  lastUsedAt: number;
+};
+
+// 控制内存：最多缓存 N 张解码后的 Blob URL（不影响 UI，只影响性能/内存）
+const BLOB_URL_CACHE_MAX = 180;
+const blobUrlCache = new Map<string, BlobUrlCacheEntry>();
+
 type AlbumAsset = {
   assetId: string;
   // OSS 对象路径（用于签名换取临时可访问 URL）
@@ -109,40 +119,81 @@ async function fetchSignedUrl(file: string) {
   return signedUrl;
 }
 
+function evictBlobCacheIfNeeded() {
+  if (blobUrlCache.size <= BLOB_URL_CACHE_MAX) return;
+  // 按最久未使用淘汰
+  const items = [...blobUrlCache.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+  const removeCount = Math.max(1, blobUrlCache.size - BLOB_URL_CACHE_MAX);
+  for (let i = 0; i < removeCount; i++) {
+    const [key, entry] = items[i];
+    URL.revokeObjectURL(entry.objectUrl);
+    blobUrlCache.delete(key);
+  }
+}
+
+async function fetchAsBlobUrl(signedUrl: string, mimeFallback?: string) {
+  const res = await fetch(signedUrl, { cache: "no-store" });
+  if (!res.ok) throw new Error(`图片请求失败：HTTP ${res.status}`);
+  const mime = res.headers.get("content-type") || mimeFallback || "application/octet-stream";
+  const blob = await res.blob();
+  // 有些浏览器/环境下 blob.type 可能为空，这里强制补齐 mime
+  const fixedBlob = blob.type ? blob : new Blob([blob], { type: mime });
+  return URL.createObjectURL(fixedBlob);
+}
+
 function useAssetImageUrl(asset: AlbumAsset, refreshToken = 0) {
   const file = asset.file?.trim();
-  const fallback = asset.src ?? undefined;
-  const [url, setUrl] = useState<string | undefined>(() => fallback);
+  const fallback = asset.src ?? undefined; // 兼容本地路径（如果还存在）
+  const [url, setUrl] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
+
     if (!file) {
       setUrl(fallback);
       return;
     }
 
-    const cached = signedUrlCache.get(file);
-    if (cached && cached.expiresAt - Date.now() > 30_000) {
-      setUrl(cached.url);
+    // 1) 优先命中 Blob URL 缓存（避免重复下载）
+    const blobCached = blobUrlCache.get(file);
+    if (blobCached) {
+      blobCached.lastUsedAt = Date.now();
+      setUrl(blobCached.objectUrl);
       return;
     }
 
+    // 2) 先拿签名 URL，再 fetch 成 blob，最后转成 ObjectURL 给 <img>
     setUrl(undefined);
     void fetchSignedUrl(file)
-      .then((u) => {
-        if (cancelled) return;
-        setUrl(u ?? fallback);
+      .then(async (signed) => {
+        if (!signed) throw new Error("获取签名URL失败");
+        // fetch blob（注意：若 OSS 未配 CORS，这里会在浏览器报 TypeError: Failed to fetch）
+        const objectUrl = await fetchAsBlobUrl(signed, asset.mime);
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+
+        blobUrlCache.set(file, {
+          objectUrl,
+          createdAt: Date.now(),
+          lastUsedAt: Date.now(),
+        });
+        evictBlobCacheIfNeeded();
+        setUrl(objectUrl);
       })
       .catch((e) => {
         if (cancelled) return;
         // 不打断 UI，保底用 fallback（若存在）
         // eslint-disable-next-line no-console
-        console.warn("[album] fetchSignedUrl failed:", e);
+        console.warn("[album] fetchSignedUrl/fetch blob failed:", e);
         setUrl(fallback);
       });
 
     return () => {
       cancelled = true;
+      abort.abort();
     };
   }, [file, fallback, refreshToken]);
 
