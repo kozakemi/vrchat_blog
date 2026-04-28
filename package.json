@@ -6,11 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "postbuild": "node tools/album-manifest/copy-vrchat-to-dist.js",
     "lint": "eslint .",
     "preview": "vite preview",
     "check": "tsc -b --noEmit",
-    "album:manifest": "node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --src-prefix ./VRChat"
+    "album:manifest": "node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --file-prefix VRChat"
   },
   "dependencies": {
     "@fontsource/nunito": "^5.2.7",

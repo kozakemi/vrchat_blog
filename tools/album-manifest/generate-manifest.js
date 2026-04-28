@@ -9,6 +9,7 @@
  *   node tools/album-manifest/generate-manifest.js \
  *     --in VRChat \
  *     --out public/albums/manifest.json \
+ *     --file-prefix VRChat \
  *     --src-prefix ./VRChat
  */
 
@@ -22,13 +23,16 @@ function parseArgs(argv) {
   const args = {
     inDir: "VRChat",
     outFile: "public/albums/manifest.json",
-    srcPrefix: "./VRChat",
+    filePrefix: "VRChat",
+    // 默认不写 src（避免依赖本地静态文件），只写 file 交由前端去换取签名 URL
+    srcPrefix: "",
   };
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--in") args.inDir = argv[++i];
     else if (a === "--out") args.outFile = argv[++i];
+    else if (a === "--file-prefix") args.filePrefix = argv[++i];
     else if (a === "--src-prefix") args.srcPrefix = argv[++i];
     else if (a === "-h" || a === "--help") args.help = true;
   }
@@ -38,11 +42,12 @@ function parseArgs(argv) {
 function usage() {
   return [
     "用法：",
-    "  node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --src-prefix ./VRChat",
+    "  node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --file-prefix VRChat --src-prefix ./VRChat",
     "",
     "参数：",
     "  --in         输入目录（默认 VRChat）",
     "  --out        输出 manifest 路径（默认 public/albums/manifest.json）",
+    "  --file-prefix 写入到 manifest.assets[].file 的前缀（默认 VRChat）",
     "  --src-prefix 写入到 manifest.assets[].src 的前缀（默认 ./VRChat）",
   ].join("\n");
 }
@@ -194,7 +199,9 @@ async function main() {
   for (const abs of files) {
     const rel = path.relative(inAbs, abs);
     const relNorm = normalizeRel(rel);
-    const src = `${args.srcPrefix.replace(/\/$/, "")}/${relNorm}`;
+    const file = `${args.filePrefix.replace(/\/$/, "")}/${relNorm}`;
+    const srcPrefix = (args.srcPrefix ?? "").trim();
+    const src = srcPrefix ? `${srcPrefix.replace(/\/$/, "")}/${relNorm}` : null;
     const stat = await fs.stat(abs);
 
     const buf = await fs.readFile(abs);
@@ -227,6 +234,7 @@ async function main() {
 
     assets.push({
       assetId: toAssetId(relNorm),
+      file,
       src,
       mime: path.extname(abs).toLowerCase() === ".png" ? "image/png" : undefined,
       bytes: stat.size,
@@ -268,4 +276,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-
