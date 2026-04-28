@@ -5,9 +5,29 @@ import { AlertCircle } from "lucide-react";
 
 type AlbumViewMode = "time" | "world";
 
+type SignedUrlResponse = {
+  signedUrl?: string;
+  expire_in?: number;
+};
+
+type SignedUrlCacheEntry = {
+  url: string;
+  expiresAt: number;
+};
+
+const SIGN_ENDPOINT =
+  import.meta.env.VITE_OSS_SIGN_ENDPOINT ??
+  "https://vrchat-oss-wdmpygkprb.cn-beijing.fcapp.run";
+
+const signedUrlCache = new Map<string, SignedUrlCacheEntry>();
+
 type AlbumAsset = {
   assetId: string;
-  src: string;
+  // OSS 对象路径（用于签名换取临时可访问 URL）
+  // 例如：VRChat/2026-01/VRChat_....png
+  file?: string;
+  // 兼容：本地/静态路径（开发阶段可用）
+  src?: string | null;
   mime?: string;
   width?: number;
   height?: number;
@@ -39,6 +59,94 @@ function formatTs(ts: number) {
   const hh = String(d.getHours()).padStart(2, "0");
   const mi = String(d.getMinutes()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+}
+
+function normalizeSignedUrl(value: string) {
+  // 兼容后端/调用方把 URL 包在反引号里：`http://...`
+  let s = value.trim();
+  if (
+    (s.startsWith("`") && s.endsWith("`")) ||
+    (s.startsWith("\"") && s.endsWith("\"")) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  // 处理仅一侧带反引号的情况
+  s = s.replace(/^`/, "").replace(/`$/, "");
+
+  // 尽量统一到 https（GitHub Pages 为 https，http 资源容易被浏览器拦截）
+  if (s.startsWith("http://vrchat-png.oss-cn-beijing.aliyuncs.com/")) {
+    s = s.replace("http://", "https://");
+  }
+  return s;
+}
+
+async function fetchSignedUrl(file: string) {
+  const endpoint = SIGN_ENDPOINT?.trim();
+  if (!endpoint) return null;
+
+  const cached = signedUrlCache.get(file);
+  if (cached && cached.expiresAt - Date.now() > 30_000) return cached.url;
+
+  const url = `${endpoint.replace(/\/+$/, "")}?file=${encodeURIComponent(file)}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`获取签名 URL 失败：HTTP ${res.status}`);
+  const data = (await res.json()) as SignedUrlResponse;
+  const signedUrlRaw = data.signedUrl;
+  if (!signedUrlRaw) throw new Error("签名接口返回缺少 signedUrl 字段");
+
+  const signedUrl = normalizeSignedUrl(String(signedUrlRaw));
+  // 防御：如果签名服务把路径斜杠编码成 %2F 或 %252F，OSS 会按字面量 key 查找导致 404。
+  // 这种情况前端无法修复（改路径会导致签名不匹配），需要修复签名服务。
+  const pathPart = signedUrl.split("?", 1)[0] ?? signedUrl;
+  if (/%252F|%2F/i.test(pathPart)) {
+    throw new Error("签名URL路径包含%2F（斜杠被编码），请修复签名服务生成逻辑");
+  }
+  const expireIn = Number.isFinite(Number(data.expire_in)) ? Number(data.expire_in) : 300;
+  const expiresAt = Date.now() + Math.max(1, expireIn) * 1000;
+
+  signedUrlCache.set(file, { url: signedUrl, expiresAt });
+  return signedUrl;
+}
+
+function useAssetImageUrl(asset: AlbumAsset, refreshToken = 0) {
+  const file = asset.file?.trim();
+  const fallback = asset.src ?? undefined;
+  const [url, setUrl] = useState<string | undefined>(() => fallback);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!file) {
+      setUrl(fallback);
+      return;
+    }
+
+    const cached = signedUrlCache.get(file);
+    if (cached && cached.expiresAt - Date.now() > 30_000) {
+      setUrl(cached.url);
+      return;
+    }
+
+    setUrl(undefined);
+    void fetchSignedUrl(file)
+      .then((u) => {
+        if (cancelled) return;
+        setUrl(u ?? fallback);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // 不打断 UI，保底用 fallback（若存在）
+        // eslint-disable-next-line no-console
+        console.warn("[album] fetchSignedUrl failed:", e);
+        setUrl(fallback);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [file, fallback, refreshToken]);
+
+  return url;
 }
 
 export default function Album() {
@@ -292,12 +400,7 @@ export default function Album() {
                       title={a.world?.worldName ?? a.world?.worldId ?? "世界未知"}
                     >
                       <div className="relative aspect-[4/3] w-full bg-black/20">
-                        <img
-                          src={a.src}
-                          alt={a.assetId}
-                          loading="lazy"
-                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-                        />
+                        <TimeCardImage asset={a} />
                       </div>
                       <div className="flex flex-col gap-0.5 px-3 py-2 text-left">
                         <div className="truncate text-[11px] font-extrabold text-white/85">
@@ -408,12 +511,7 @@ export default function Album() {
                               className="group overflow-hidden rounded-2xl border border-white/10 bg-black/10"
                             >
                               <div className="relative aspect-[4/3] w-full bg-black/20">
-                                <img
-                                  src={a.src}
-                                  alt={a.assetId}
-                                  loading="lazy"
-                                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-                                />
+                                <TimeCardImage asset={a} />
                               </div>
                               <div className="px-3 py-2 text-left text-[11px] font-extrabold text-white/80">
                                 {formatTs(a._takenAtTs)}
@@ -537,15 +635,48 @@ export default function Album() {
                     <span className="text-white/60">assetId：</span>
                     <span className="font-extrabold">{active.assetId}</span>
                   </button>
-                  <button
-                    type="button"
-                    className="text-left hover:text-white"
-                    title="点击复制"
-                    onClick={() => void copyText(active.src, "src")}
-                  >
-                    <span className="text-white/60">src：</span>
-                    <span className="font-extrabold">{active.src}</span>
-                  </button>
+                  {active.file ? (
+                    <button
+                      type="button"
+                      className="text-left hover:text-white"
+                      title="点击复制"
+                      onClick={() => void copyText(active.file ?? "", "file")}
+                    >
+                      <span className="text-white/60">file：</span>
+                      <span className="font-extrabold">{active.file}</span>
+                    </button>
+                  ) : null}
+                  {active.file ? (
+                    <button
+                      type="button"
+                      className="text-left hover:text-white"
+                      title="点击获取并复制（短期有效）"
+                      onClick={() => {
+                        const file = active.file?.trim();
+                        if (!file) return setToast("无 file 可获取链接");
+                        void fetchSignedUrl(file)
+                          .then((url) => {
+                            if (!url) return setToast("获取链接失败");
+                            return copyText(url, "临时链接");
+                          })
+                          .catch(() => setToast("获取链接失败"));
+                      }}
+                    >
+                      <span className="text-white/60">临时链接：</span>
+                      <span className="font-extrabold">点击复制</span>
+                    </button>
+                  ) : null}
+                  {active.src ? (
+                    <button
+                      type="button"
+                      className="text-left hover:text-white"
+                      title="点击复制"
+                      onClick={() => void copyText(active.src ?? "", "src")}
+                    >
+                      <span className="text-white/60">src：</span>
+                      <span className="font-extrabold">{active.src}</span>
+                    </button>
+                  ) : null}
                   <div>
                     <span className="text-white/60">尺寸：</span>
                     <span className="font-extrabold">
@@ -572,11 +703,7 @@ export default function Album() {
             ) : null}
 
             <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/30">
-              <img
-                src={active.src}
-                alt={active.assetId}
-                className="max-h-[80vh] w-full object-contain"
-              />
+              <ActiveImage asset={active} />
             </div>
           </div>
         </div>
@@ -591,4 +718,44 @@ export default function Album() {
       ) : null}
     </div>
   );
+}
+
+function TimeCardImage({ asset }: { asset: AlbumAsset }) {
+  const [retry, setRetry] = useState(0);
+  const url = useAssetImageUrl(asset, retry);
+  // 保持现有视觉：未拿到 url 时显示背景，不额外加新 UI
+  return url ? (
+    <img
+      src={url}
+      alt={asset.assetId}
+      loading="lazy"
+      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+      onError={() => {
+        const file = asset.file?.trim();
+        if (!file) return;
+        if (retry >= 1) return;
+        signedUrlCache.delete(file);
+        setRetry(1);
+      }}
+    />
+  ) : null;
+}
+
+function ActiveImage({ asset }: { asset: AlbumAsset }) {
+  const [retry, setRetry] = useState(0);
+  const url = useAssetImageUrl(asset, retry);
+  return url ? (
+    <img
+      src={url}
+      alt={asset.assetId}
+      className="max-h-[80vh] w-full object-contain"
+      onError={() => {
+        const file = asset.file?.trim();
+        if (!file) return;
+        if (retry >= 1) return;
+        signedUrlCache.delete(file);
+        setRetry(1);
+      }}
+    />
+  ) : null;
 }
