@@ -9,6 +9,21 @@ export default defineConfig({
   build: {
     sourcemap: 'hidden',
   },
+  /** 开发时 OSS 未配置 localhost CORS 会导致 PUT/OPTIONS 失败；经代理变为同源请求 */
+  server: {
+    proxy: {
+      "/dev-oss-proxy/vrchat-png": {
+        target: "https://vrchat-png.oss-cn-beijing.aliyuncs.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/dev-oss-proxy\/vrchat-png/, ""),
+      },
+      "/dev-oss-proxy/vrchat-img": {
+        target: "https://vrchat-img.oss-cn-beijing.aliyuncs.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/dev-oss-proxy\/vrchat-img/, ""),
+      },
+    },
+  },
   plugins: [
     react({
       babel: {

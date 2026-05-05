@@ -9,12 +9,15 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "check": "tsc -b --noEmit",
-    "album:manifest": "node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --file-prefix VRChat"
+    "album:manifest": "node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --file-prefix VRChat",
+    "album:admin-key": "node tools/generate-admin-key.mjs"
   },
   "dependencies": {
     "@fontsource/nunito": "^5.2.7",
+    "ali-oss": "^6.23.0",
     "clsx": "^2.1.1",
     "i18next": "^25.8.18",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.511.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

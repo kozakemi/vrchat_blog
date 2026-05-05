@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Local-only key material (do not commit)
+keys/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

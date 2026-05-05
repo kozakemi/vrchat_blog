@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import i18n, { persistLanguage } from "@/i18n";
+import {
+  SESSION_ALBUM_GRANTED_KEY,
+  STORAGE_AUTH_MODE_KEY,
+  STORAGE_GUEST_NICKNAME_KEY,
+} from "@/lib/authGate";
+import { isAdminKeyFile, parseKeyFileJson, validateKeyFile } from "@/lib/keyFile";
+import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 const LANG_CYCLE = ["zh", "ja", "en"] as const;
 type AppLanguage = (typeof LANG_CYCLE)[number];
@@ -34,9 +41,6 @@ type LoginEffectState =
 
 type JoinStatus = "connecting" | "joining";
 
-const STORAGE_AUTH_MODE_KEY = "td_auth_mode";
-const STORAGE_GUEST_NICKNAME_KEY = "td_guest_nickname";
-
 function loadAuthState(): AuthState {
   const mode = window.localStorage.getItem(STORAGE_AUTH_MODE_KEY);
   if (mode === "guest") {
@@ -59,6 +63,7 @@ function clearAuthPersistence() {
 export default function Home() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [view, setView] = useState<"home" | "login" | "authed" | "joining">("home");
   const [auth, setAuth] = useState<AuthState>(() => loadAuthState());
   const [loginMode, setLoginMode] = useState<LoginMode>("key");
@@ -68,15 +73,25 @@ export default function Home() {
     return saved ?? "";
   });
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [keyFileError, setKeyFileError] = useState<string | null>(null);
   const [loginEffect, setLoginEffect] = useState<LoginEffectState>(null);
   const [loginProgress, setLoginProgress] = useState(0);
   const [joinStatus, setJoinStatus] = useState<JoinStatus>("connecting");
-  const [joinAccountLabel, setJoinAccountLabel] = useState<string>("");
   const sceneRef = useRef<HTMLDivElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const keyInputRef = useRef<HTMLInputElement | null>(null);
 
   const languageLabel = useMemo(() => getLanguageLabel(i18n.language), [i18n.language]);
+
+  useEffect(() => {
+    if (searchParams.get("login") !== "1") return;
+    setView("login");
+    setLoginMode("key");
+    setKeyFileError(null);
+    const next = new URLSearchParams(searchParams);
+    next.delete("login");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -189,7 +204,6 @@ export default function Home() {
       setAuth({ status: "authed", mode: "guest", nickname });
     }
 
-    setJoinAccountLabel(loginEffect.accountLabel);
     setJoinStatus("connecting");
     setView("joining");
     setLoginEffect(null);
@@ -214,6 +228,7 @@ export default function Home() {
     setJoinStatus("connecting");
     const t1 = window.setTimeout(() => setJoinStatus("joining"), 1400);
     const t2 = window.setTimeout(() => {
+      window.sessionStorage.setItem(SESSION_ALBUM_GRANTED_KEY, "1");
       navigate("/album");
     }, 2600);
 
@@ -357,7 +372,10 @@ export default function Home() {
                               loginMode === "key" ? "login-mode login-mode-active" : "login-mode"
                             }
                             type="button"
-                            onClick={() => setLoginMode("key")}
+                            onClick={() => {
+                              setLoginMode("key");
+                              setKeyFileError(null);
+                            }}
                             role="tab"
                             aria-selected={loginMode === "key"}
                           >
@@ -370,7 +388,11 @@ export default function Home() {
                                 : "login-mode"
                             }
                             type="button"
-                            onClick={() => setLoginMode("guest")}
+                            onClick={() => {
+                              setLoginMode("guest");
+                              setKeyFileError(null);
+                              useSessionAuthStore.getState().setKeySession(null);
+                            }}
                             role="tab"
                             aria-selected={loginMode === "guest"}
                           >
@@ -386,6 +408,7 @@ export default function Home() {
                               type="file"
                               onChange={(e) => {
                                 setKeyFile(e.currentTarget.files?.[0] ?? null);
+                                setKeyFileError(null);
                               }}
                             />
                             <button
@@ -398,6 +421,11 @@ export default function Home() {
                             {keyFile ? (
                               <div className="login-hint">
                                 {t("keySelected")}: {keyFile.name}
+                              </div>
+                            ) : null}
+                            {keyFileError ? (
+                              <div className="login-hint" style={{ color: "rgba(255,180,180,0.95)" }}>
+                                {keyFileError}
                               </div>
                             ) : null}
                           </>
@@ -420,6 +448,7 @@ export default function Home() {
                             onClick={() => {
                               setView("home");
                               setKeyFile(null);
+                              setKeyFileError(null);
                               setIsHelpOpen(false);
                             }}
                           >
@@ -431,12 +460,38 @@ export default function Home() {
                             disabled={loginMode === "key" ? !keyFile : !guestNickname.trim()}
                             onClick={() => {
                               if (loginMode === "key") {
-                                const name = keyFile ? keyFile.name : "Key";
-                                setLoginProgress(0);
-                                setLoginEffect({ mode: "key", accountLabel: name });
+                                if (!keyFile) return;
+                                void (async () => {
+                                  try {
+                                    const text = await keyFile.text();
+                                    const data = parseKeyFileJson(text);
+                                    const err = validateKeyFile(data);
+                                    if (err) {
+                                      setKeyFileError(err);
+                                      return;
+                                    }
+                                    setKeyFileError(null);
+                                    useSessionAuthStore.getState().setKeySession({
+                                      username: data.username.trim(),
+                                      zones: data.zones,
+                                      roles: data.roles ?? [],
+                                      isAdmin: isAdminKeyFile(data),
+                                    });
+                                    setLoginProgress(0);
+                                    setLoginEffect({
+                                      mode: "key",
+                                      accountLabel: data.username.trim(),
+                                    });
+                                  } catch (e) {
+                                    setKeyFileError(
+                                      e instanceof Error ? e.message : "密钥文件无法解析",
+                                    );
+                                  }
+                                })();
                                 return;
                               }
 
+                              useSessionAuthStore.getState().setKeySession(null);
                               const nickname = guestNickname.trim();
                               if (!nickname) return;
                               setLoginProgress(0);
@@ -479,6 +534,8 @@ export default function Home() {
                             onClick={() => {
                               setAuth({ status: "anonymous" });
                               clearAuthPersistence();
+                              window.sessionStorage.removeItem(SESSION_ALBUM_GRANTED_KEY);
+                              useSessionAuthStore.getState().setKeySession(null);
                               setKeyFile(null);
                               setView("home");
                             }}
