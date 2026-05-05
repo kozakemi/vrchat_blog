@@ -132,7 +132,13 @@ function evictBlobCacheIfNeeded() {
 }
 
 async function fetchAsBlobUrl(signedUrl: string, mimeFallback?: string) {
-  const res = await fetch(signedUrl, { cache: "no-store" });
+  // OSS Bucket 可能开启了 Referer 防盗链策略；浏览器默认会携带 Referer，导致 403：
+  // <Message>You are denied by bucket referer policy.</Message>
+  // 这里显式关闭 Referer 发送（只影响这次请求，不改变 UI）。
+  const res = await fetch(signedUrl, {
+    cache: "no-store",
+    referrerPolicy: "no-referrer",
+  });
   if (!res.ok) throw new Error(`图片请求失败：HTTP ${res.status}`);
   const mime = res.headers.get("content-type") || mimeFallback || "application/octet-stream";
   const blob = await res.blob();
