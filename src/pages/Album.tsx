@@ -1,7 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { hasAlbumRouteAccess, STORAGE_GUEST_NICKNAME_KEY } from "@/lib/authGate";
+import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
+import { getAlbumManifestUrl } from "@/lib/manifestUrl";
+import { normalizeSignedUrl } from "@/lib/ossSignedUrl";
 import { cn } from "@/lib/utils";
 import { AlertCircle } from "lucide-react";
+import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 type AlbumViewMode = "time" | "world";
 
@@ -54,6 +59,27 @@ type AlbumManifest = {
   assets: AlbumAsset[];
 };
 
+/** 生产环境未配置 VITE_ALBUM_MANIFEST_URL 时，可能拿到 SPA 首页 HTML 而非 JSON */
+async function fetchAlbumManifestOrThrow(): Promise<AlbumManifest> {
+  const logicalUrl = getAlbumManifestUrl();
+  const url = rewriteOssUrlForDevFetch(logicalUrl);
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`加载 manifest 失败：HTTP ${r.status}。请求：${logicalUrl}`);
+  const text = await r.text();
+  const lead = text.trimStart().slice(0, 120).toLowerCase();
+  if (lead.startsWith("<!doctype") || lead.startsWith("<html") || lead.startsWith("<!")) {
+    throw new Error(
+      "清单地址返回了网页（HTML）而不是 JSON。若清单只存放在 OSS，必须在构建前设置环境变量 VITE_ALBUM_MANIFEST_URL 为该清单的完整 HTTPS URL（例如 https://<bucket>.oss-cn-beijing.aliyuncs.com/albums/manifest.json），然后重新执行 npm run build 并部署。未设置时，相册会请求当前站点域名下的 albums/manifest.json；若无该静态文件，托管方常会回退到首页 HTML，从而出现本错误。",
+    );
+  }
+  try {
+    return JSON.parse(text) as AlbumManifest;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`解析 manifest 失败：${msg}。请求：${logicalUrl}`);
+  }
+}
+
 function toTs(iso?: string) {
   if (!iso) return Number.NEGATIVE_INFINITY;
   const t = Date.parse(iso);
@@ -69,26 +95,6 @@ function formatTs(ts: number) {
   const hh = String(d.getHours()).padStart(2, "0");
   const mi = String(d.getMinutes()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
-}
-
-function normalizeSignedUrl(value: string) {
-  // 兼容后端/调用方把 URL 包在反引号里：`http://...`
-  let s = value.trim();
-  if (
-    (s.startsWith("`") && s.endsWith("`")) ||
-    (s.startsWith("\"") && s.endsWith("\"")) ||
-    (s.startsWith("'") && s.endsWith("'"))
-  ) {
-    s = s.slice(1, -1).trim();
-  }
-  // 处理仅一侧带反引号的情况
-  s = s.replace(/^`/, "").replace(/`$/, "");
-
-  // 尽量统一到 https（GitHub Pages 为 https，http 资源容易被浏览器拦截）
-  if (s.startsWith("http://vrchat-png.oss-cn-beijing.aliyuncs.com/")) {
-    s = s.replace("http://", "https://");
-  }
-  return s;
 }
 
 async function fetchSignedUrl(file: string) {
@@ -135,7 +141,7 @@ async function fetchAsBlobUrl(signedUrl: string, mimeFallback?: string) {
   // OSS 防盗链若配置「不允许空 Referer」，使用 no-referrer 会不带 Referer → 403。
   // strict-origin-when-cross-origin：跨域请求只发送当前页面的 origin（如 https://vrchat.kozakemi.top），
   // 需与控制台 Referer 白名单一致；本地 localhost 开发时请在白名单中加入对应来源或临时允许空 Referer。
-  const res = await fetch(signedUrl, {
+  const res = await fetch(rewriteOssUrlForDevFetch(signedUrl), {
     cache: "no-store",
     referrerPolicy: "strict-origin-when-cross-origin",
   });
@@ -207,9 +213,31 @@ function useAssetImageUrl(asset: AlbumAsset, refreshToken = 0) {
 }
 
 export default function Album() {
+  const navigate = useNavigate();
+  const keySession = useSessionAuthStore((s) => s.keySession);
+  const [routeReady, setRouteReady] = useState(false);
+  const [guestNickname, setGuestNickname] = useState("");
   const [mode, setMode] = useState<AlbumViewMode>("time");
   const [manifest, setManifest] = useState<AlbumManifest | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const displayName = useMemo(() => {
+    if (keySession?.username) return keySession.username;
+    const g = guestNickname.trim();
+    return g ? `访客 · ${g}` : null;
+  }, [keySession?.username, guestNickname]);
+
+  useLayoutEffect(() => {
+    if (hasAlbumRouteAccess()) {
+      setRouteReady(true);
+      return;
+    }
+    navigate({ pathname: "/", search: "?login=1" }, { replace: true });
+  }, [navigate]);
+
+  useEffect(() => {
+    setGuestNickname(window.localStorage.getItem(STORAGE_GUEST_NICKNAME_KEY) ?? "");
+  }, []);
 
   // lightbox
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -227,11 +255,7 @@ export default function Album() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    fetch("./albums/manifest.json")
-      .then((r) => {
-        if (!r.ok) throw new Error(`加载 manifest 失败：HTTP ${r.status}`);
-        return r.json() as Promise<AlbumManifest>;
-      })
+    fetchAlbumManifestOrThrow()
       .then((data) => {
         if (cancelled) return;
         setManifest(data);
@@ -381,24 +405,43 @@ export default function Album() {
     }
   }
 
+  if (!routeReady) {
+    return (
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 text-sm text-white/70">
+        正在校验访问…
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-40 flex flex-col bg-black/20">
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/30 via-black/10 to-black/40" />
 
       <header className="relative z-10 flex items-center justify-between gap-3 px-4 py-3">
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
           <Link
             to="/"
-            className="rounded-xl border border-white/20 bg-black/20 px-3 py-2 text-sm font-extrabold text-white/90 backdrop-blur hover:bg-black/30"
+            className="shrink-0 rounded-xl border border-white/20 bg-black/20 px-3 py-2 text-sm font-extrabold text-white/90 backdrop-blur hover:bg-black/30"
           >
             返回
           </Link>
-          <div className="text-sm font-extrabold tracking-wide text-white/90">
-            相册
+          <div className="min-w-0">
+            <div className="text-sm font-extrabold tracking-wide text-white/90">相册</div>
+            {displayName ? (
+              <div className="truncate text-[11px] font-bold text-white/55">{displayName}</div>
+            ) : null}
           </div>
+          {keySession?.isAdmin ? (
+            <Link
+              to="/album-admin"
+              className="ml-1 shrink-0 rounded-xl border border-amber-400/35 bg-amber-500/15 px-3 py-1.5 text-[11px] font-extrabold text-amber-100/95 hover:bg-amber-500/25"
+            >
+              管理
+            </Link>
+          ) : null}
         </div>
 
-        <div className="flex items-center gap-2 rounded-2xl border border-white/15 bg-black/15 p-1 backdrop-blur">
+        <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-white/15 bg-black/15 p-1 backdrop-blur">
           <button
             type="button"
             onClick={() => setMode("time")}
@@ -428,8 +471,11 @@ export default function Album() {
             <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-950/30 p-4 text-sm text-red-100">
               {error}
               <div className="mt-2 text-xs text-red-200/80">
-                请确认存在 <code className="rounded bg-black/30 px-1 py-0.5">public/albums/manifest.json</code>
-                （开发环境当前通过 <code className="rounded bg-black/30 px-1 py-0.5">/VRChat/...</code> 引用图片）。
+                清单仅在上传 OSS 时：请在构建环境设置 <code className="rounded bg-black/30 px-1 py-0.5">VITE_ALBUM_MANIFEST_URL</code>{" "}
+                为 OSS 上该文件的完整 HTTPS URL，并重新构建部署。若清单在根路径{" "}
+                <code className="rounded bg-black/30 px-1 py-0.5">manifest.json</code>
+                ，变量须指向该 URL；若在 <code className="rounded bg-black/30 px-1 py-0.5">albums/manifest.json</code>
+                ，则指向对应 URL。
               </div>
             </div>
           ) : null}
