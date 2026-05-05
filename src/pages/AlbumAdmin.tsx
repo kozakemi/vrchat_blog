@@ -4,8 +4,9 @@ import JSZip from "jszip";
 import { encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
 import { hasAlbumRouteAccess } from "@/lib/authGate";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
-import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
+import { getManifestObjectKey, tryFetchAlbumManifest } from "@/lib/albumManifestFetch";
 import { getAlbumManifestUrl } from "@/lib/manifestUrl";
+import { getOssSignEndpoint } from "@/lib/ossSignFetch";
 import {
   clearOssConfigSession,
   getDefaultOssJsonTemplate,
@@ -259,16 +260,11 @@ export default function AlbumAdmin() {
   }
 
   async function mergeAndUploadManifest(newAssets: Record<string, unknown>[], ossCfg: OssUploadConfig) {
-    const manifestUrl = getAlbumManifestUrl();
     let existing: { schemaVersion?: number; generatedAt?: string; assets?: Record<string, unknown>[] } =
       { schemaVersion: 1, assets: [] };
-    try {
-      const res = await fetch(rewriteOssUrlForDevFetch(manifestUrl), { cache: "no-store" });
-      if (res.ok) {
-        existing = (await res.json()) as typeof existing;
-      }
-    } catch {
-      /* 首次部署或无清单 */
+    const remote = await tryFetchAlbumManifest();
+    if (remote && typeof remote === "object" && remote !== null) {
+      existing = remote as typeof existing;
     }
     const prevAssets = Array.isArray(existing.assets) ? existing.assets : [];
     const byId = new Map<string, Record<string, unknown>>();
@@ -683,7 +679,14 @@ export default function AlbumAdmin() {
         ) : null}
 
         <p className="text-[10px] text-white/40">
-          当前清单地址（合并上传前会拉取）：{getAlbumManifestUrl()}
+          {getOssSignEndpoint() ? (
+            <>
+              合并前拉取清单：与相册相同经函数计算，对象键{" "}
+              <code className="text-white/55">{getManifestObjectKey()}</code>
+            </>
+          ) : (
+            <>合并前直链：{getAlbumManifestUrl()}</>
+          )}
         </p>
       </div>
     </div>

@@ -1,30 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { hasAlbumRouteAccess, STORAGE_GUEST_NICKNAME_KEY } from "@/lib/authGate";
+import { base64ToBytes, buildAadJson, importAesGcmKey } from "@/lib/albumCrypto";
+import { fetchAlbumManifestOrThrow } from "@/lib/albumManifestFetch";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
-import { getAlbumManifestUrl } from "@/lib/manifestUrl";
-import { normalizeSignedUrl } from "@/lib/ossSignedUrl";
+import { fetchSignedUrlForOssObject, invalidateSignedUrlCacheForObjectKey } from "@/lib/ossSignFetch";
 import { cn } from "@/lib/utils";
 import { AlertCircle } from "lucide-react";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 type AlbumViewMode = "time" | "world";
-
-type SignedUrlResponse = {
-  signedUrl?: string;
-  expire_in?: number;
-};
-
-type SignedUrlCacheEntry = {
-  url: string;
-  expiresAt: number;
-};
-
-const SIGN_ENDPOINT =
-  import.meta.env.VITE_OSS_SIGN_ENDPOINT ??
-  "https://vrchat-oss-wdmpygkprb.cn-beijing.fcapp.run";
-
-const signedUrlCache = new Map<string, SignedUrlCacheEntry>();
 
 type BlobUrlCacheEntry = {
   objectUrl: string;
@@ -38,9 +23,21 @@ const blobUrlCache = new Map<string, BlobUrlCacheEntry>();
 
 type AlbumAsset = {
   assetId: string;
+  zoneId?: string | null;
+  originalName?: string | null;
+  relPath?: string | null;
   // OSS 对象路径（用于签名换取临时可访问 URL）
   // 例如：VRChat/2026-01/VRChat_....png
   file?: string;
+  // 加密资源的 OSS 对象键（管理员上传生成的 .bin）
+  cipherFile?: string | null;
+  nonceB64?: string | null;
+  aad?: {
+    v?: number;
+    zoneId?: string;
+    assetId?: string;
+    mime?: string;
+  } | null;
   // 兼容：本地/静态路径（开发阶段可用）
   src?: string | null;
   mime?: string;
@@ -59,26 +56,13 @@ type AlbumManifest = {
   assets: AlbumAsset[];
 };
 
-/** 生产环境未配置 VITE_ALBUM_MANIFEST_URL 时，可能拿到 SPA 首页 HTML 而非 JSON */
-async function fetchAlbumManifestOrThrow(): Promise<AlbumManifest> {
-  const logicalUrl = getAlbumManifestUrl();
-  const url = rewriteOssUrlForDevFetch(logicalUrl);
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`加载 manifest 失败：HTTP ${r.status}。请求：${logicalUrl}`);
-  const text = await r.text();
-  const lead = text.trimStart().slice(0, 120).toLowerCase();
-  if (lead.startsWith("<!doctype") || lead.startsWith("<html") || lead.startsWith("<!")) {
-    throw new Error(
-      "清单地址返回了网页（HTML）而不是 JSON。若清单只存放在 OSS，必须在构建前设置环境变量 VITE_ALBUM_MANIFEST_URL 为该清单的完整 HTTPS URL（例如 https://<bucket>.oss-cn-beijing.aliyuncs.com/albums/manifest.json），然后重新执行 npm run build 并部署。未设置时，相册会请求当前站点域名下的 albums/manifest.json；若无该静态文件，托管方常会回退到首页 HTML，从而出现本错误。",
-    );
-  }
-  try {
-    return JSON.parse(text) as AlbumManifest;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`解析 manifest 失败：${msg}。请求：${logicalUrl}`);
-  }
-}
+type AssetResolvedMetadata = {
+  takenAt?: string;
+  world?: {
+    worldId?: string | null;
+    worldName?: string | null;
+  };
+};
 
 function toTs(iso?: string) {
   if (!iso) return Number.NEGATIVE_INFINITY;
@@ -97,32 +81,138 @@ function formatTs(ts: number) {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
 
-async function fetchSignedUrl(file: string) {
-  const endpoint = SIGN_ENDPOINT?.trim();
-  if (!endpoint) return null;
+function parseTakenAtFromName(name?: string | null) {
+  if (!name) return undefined;
+  const base = name.split("/").pop() ?? name;
+  const m = base.match(
+    /^VRChat_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\.(\d{3})_/,
+  );
+  if (!m) return undefined;
+  const [, y, mo, d, hh, mm, ss, ms] = m;
+  return `${y}-${mo}-${d}T${hh}:${mm}:${ss}.${ms}`;
+}
 
-  const cached = signedUrlCache.get(file);
-  if (cached && cached.expiresAt - Date.now() > 30_000) return cached.url;
+function inferTakenAt(asset: AlbumAsset) {
+  return (
+    asset.takenAt ||
+    parseTakenAtFromName(asset.originalName) ||
+    parseTakenAtFromName(asset.relPath) ||
+    parseTakenAtFromName(asset.file) ||
+    parseTakenAtFromName(asset.src ?? undefined)
+  );
+}
 
-  const url = `${endpoint.replace(/\/+$/, "")}?file=${encodeURIComponent(file)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`获取签名 URL 失败：HTTP ${res.status}`);
-  const data = (await res.json()) as SignedUrlResponse;
-  const signedUrlRaw = data.signedUrl;
-  if (!signedUrlRaw) throw new Error("签名接口返回缺少 signedUrl 字段");
+function readU32BE(bytes: Uint8Array, offset: number) {
+  return (
+    (bytes[offset] << 24) |
+    (bytes[offset + 1] << 16) |
+    (bytes[offset + 2] << 8) |
+    bytes[offset + 3]
+  ) >>> 0;
+}
 
-  const signedUrl = normalizeSignedUrl(String(signedUrlRaw));
-  // 防御：如果签名服务把路径斜杠编码成 %2F 或 %252F，OSS 会按字面量 key 查找导致 404。
-  // 这种情况前端无法修复（改路径会导致签名不匹配），需要修复签名服务。
-  const pathPart = signedUrl.split("?", 1)[0] ?? signedUrl;
-  if (/%252F|%2F/i.test(pathPart)) {
-    throw new Error("签名URL路径包含%2F（斜杠被编码），请修复签名服务生成逻辑");
+function pickXmpField(xml: string, tagName: string) {
+  const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<[^>]*${escaped}[^>]*>([^<]+)</[^>]*${escaped}>`, "i");
+  const m = xml.match(re);
+  return m ? m[1].trim() : null;
+}
+
+async function inflateDeflateRaw(bytes: Uint8Array) {
+  if (typeof DecompressionStream === "undefined") return null;
+  try {
+    const ds = new DecompressionStream("deflate");
+    const writer = ds.writable.getWriter();
+    await writer.write(bytes);
+    await writer.close();
+    const ab = await new Response(ds.readable).arrayBuffer();
+    return new Uint8Array(ab);
+  } catch {
+    return null;
   }
-  const expireIn = Number.isFinite(Number(data.expire_in)) ? Number(data.expire_in) : 300;
-  const expiresAt = Date.now() + Math.max(1, expireIn) * 1000;
+}
 
-  signedUrlCache.set(file, { url: signedUrl, expiresAt });
-  return signedUrl;
+async function extractPngXmp(bytes: Uint8Array) {
+  if (bytes.length < 8) return null;
+  const pngSig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let i = 0; i < pngSig.length; i++) {
+    if (bytes[i] !== pngSig[i]) return null;
+  }
+
+  let offset = 8;
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  while (offset + 12 <= bytes.length) {
+    const length = readU32BE(bytes, offset);
+    const type = decoder.decode(bytes.slice(offset + 4, offset + 8));
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > bytes.length) break;
+
+    const data = bytes.slice(dataStart, dataEnd);
+    if (type === "tEXt") {
+      const zero = data.indexOf(0);
+      if (zero > 0) {
+        const keyword = decoder.decode(data.slice(0, zero));
+        if (keyword === "XML:com.adobe.xmp" || keyword === "xmp") {
+          return decoder.decode(data.slice(zero + 1));
+        }
+      }
+    }
+
+    if (type === "iTXt") {
+      const zero = data.indexOf(0);
+      if (zero > 0) {
+        const keyword = decoder.decode(data.slice(0, zero));
+        if (keyword === "XML:com.adobe.xmp" || keyword === "xmp") {
+          let p = zero + 1;
+          const compressionFlag = data[p];
+          p += 1;
+          p += 1; // compression method
+          const langEnd = data.indexOf(0, p);
+          if (langEnd < 0) return null;
+          p = langEnd + 1;
+          const transEnd = data.indexOf(0, p);
+          if (transEnd < 0) return null;
+          p = transEnd + 1;
+          const payload = data.slice(p);
+          const xmlBytes =
+            compressionFlag === 1 ? ((await inflateDeflateRaw(payload)) ?? payload) : payload;
+          return decoder.decode(xmlBytes);
+        }
+      }
+    }
+
+    offset = dataEnd + 4;
+  }
+  return null;
+}
+
+async function resolveMetadataFromPlainBytes(asset: AlbumAsset, bytes: Uint8Array) {
+  const mime = asset.mime?.toLowerCase() ?? "";
+  const out: AssetResolvedMetadata = { takenAt: inferTakenAt(asset) };
+  const isPng =
+    mime.includes("png") ||
+    (bytes.length >= 4 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47);
+  if (!isPng) return out;
+
+  const xmp = await extractPngXmp(bytes);
+  if (!xmp) return out;
+
+  const takenAt = pickXmpField(xmp, "CreateDate") || pickXmpField(xmp, "xmp:CreateDate");
+  const worldId = pickXmpField(xmp, "WorldID");
+  const worldName = pickXmpField(xmp, "WorldDisplayName");
+
+  return {
+    takenAt: takenAt || out.takenAt,
+    world: {
+      worldId: worldId || null,
+      worldName: worldName || null,
+    },
+  };
 }
 
 function evictBlobCacheIfNeeded() {
@@ -137,7 +227,7 @@ function evictBlobCacheIfNeeded() {
   }
 }
 
-async function fetchAsBlobUrl(signedUrl: string, mimeFallback?: string) {
+async function fetchAsBlobUrl(asset: AlbumAsset, signedUrl: string, mimeFallback?: string) {
   // OSS 防盗链若配置「不允许空 Referer」，使用 no-referrer 会不带 Referer → 403。
   // strict-origin-when-cross-origin：跨域请求只发送当前页面的 origin（如 https://vrchat.kozakemi.top），
   // 需与控制台 Referer 白名单一致；本地 localhost 开发时请在白名单中加入对应来源或临时允许空 Referer。
@@ -147,28 +237,71 @@ async function fetchAsBlobUrl(signedUrl: string, mimeFallback?: string) {
   });
   if (!res.ok) throw new Error(`图片请求失败：HTTP ${res.status}`);
   const mime = res.headers.get("content-type") || mimeFallback || "application/octet-stream";
-  const blob = await res.blob();
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const meta = await resolveMetadataFromPlainBytes(asset, bytes);
+  const blob = new Blob([bytes], { type: mime });
   // 有些浏览器/环境下 blob.type 可能为空，这里强制补齐 mime
   const fixedBlob = blob.type ? blob : new Blob([blob], { type: mime });
-  return URL.createObjectURL(fixedBlob);
+  return { objectUrl: URL.createObjectURL(fixedBlob), meta };
 }
 
-function useAssetImageUrl(asset: AlbumAsset, refreshToken = 0) {
+async function fetchCipherBlobUrl(
+  asset: AlbumAsset,
+  signedUrl: string,
+  zoneKeyB64: string,
+  nonceB64: string,
+  aadJson: string,
+  mimeFallback?: string,
+) {
+  const res = await fetch(rewriteOssUrlForDevFetch(signedUrl), {
+    cache: "no-store",
+    referrerPolicy: "strict-origin-when-cross-origin",
+  });
+  if (!res.ok) throw new Error(`密文请求失败：HTTP ${res.status}`);
+
+  const cipherBytes = new Uint8Array(await res.arrayBuffer());
+  const iv = base64ToBytes(nonceB64);
+  const aadBytes = new TextEncoder().encode(aadJson);
+  const key = await importAesGcmKey(zoneKeyB64, ["decrypt"]);
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, additionalData: aadBytes },
+    key,
+    cipherBytes,
+  );
+
+  const plainBytes = new Uint8Array(plain);
+  const meta = await resolveMetadataFromPlainBytes(asset, plainBytes);
+  const blob = new Blob([plainBytes], { type: mimeFallback || "application/octet-stream" });
+  return { objectUrl: URL.createObjectURL(blob), meta };
+}
+
+function useAssetImageUrl(
+  asset: AlbumAsset,
+  refreshToken = 0,
+  onResolvedMetadata?: (assetId: string, meta: AssetResolvedMetadata) => void,
+) {
   const file = asset.file?.trim();
+  const cipherFile = asset.cipherFile?.trim();
   const fallback = asset.src ?? undefined; // 兼容本地路径（如果还存在）
   const [url, setUrl] = useState<string | undefined>(undefined);
+  const keySession = useSessionAuthStore((s) => s.keySession);
 
   useEffect(() => {
     let cancelled = false;
     const abort = new AbortController();
+    const objectKey = file || cipherFile || "";
+    const zoneKeyB64 =
+      asset.zoneId && keySession?.zones
+        ? keySession.zones.find((z) => z.zoneId === asset.zoneId)?.keyB64
+        : undefined;
 
-    if (!file) {
+    if (!file && !cipherFile) {
       setUrl(fallback);
       return;
     }
 
     // 1) 优先命中 Blob URL 缓存（避免重复下载）
-    const blobCached = blobUrlCache.get(file);
+    const blobCached = objectKey ? blobUrlCache.get(objectKey) : undefined;
     if (blobCached) {
       blobCached.lastUsedAt = Date.now();
       setUrl(blobCached.objectUrl);
@@ -177,23 +310,51 @@ function useAssetImageUrl(asset: AlbumAsset, refreshToken = 0) {
 
     // 2) 先拿签名 URL，再 fetch 成 blob，最后转成 ObjectURL 给 <img>
     setUrl(undefined);
-    void fetchSignedUrl(file)
-      .then(async (signed) => {
+    const run = async () => {
+      if (file) {
+        const signed = await fetchSignedUrlForOssObject(file);
         if (!signed) throw new Error("获取签名URL失败");
-        // fetch blob（注意：若 OSS 未配 CORS，这里会在浏览器报 TypeError: Failed to fetch）
-        const objectUrl = await fetchAsBlobUrl(signed, asset.mime);
+        return fetchAsBlobUrl(asset, signed, asset.mime);
+      }
+
+      if (!cipherFile) throw new Error("缺少可读取的对象键");
+      if (!asset.zoneId) throw new Error("密文资源缺少 zoneId");
+      if (!zoneKeyB64) throw new Error(`缺少 Zone「${asset.zoneId}」的解密密钥`);
+      if (!asset.nonceB64?.trim()) throw new Error("密文资源缺少 nonceB64");
+
+      const signed = await fetchSignedUrlForOssObject(cipherFile);
+      if (!signed) throw new Error("获取密文临时URL失败");
+
+      const aadJson =
+        asset.aad && typeof asset.aad === "object"
+          ? JSON.stringify(asset.aad)
+          : buildAadJson(asset.zoneId, asset.assetId, asset.mime || "application/octet-stream");
+
+      return fetchCipherBlobUrl(
+        asset,
+        signed,
+        zoneKeyB64,
+        asset.nonceB64,
+        aadJson,
+        asset.mime || asset.aad?.mime || undefined,
+      );
+    };
+
+    void run()
+      .then(({ objectUrl, meta }) => {
         if (cancelled) {
-          URL.revokeObjectURL(objectUrl);
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
           return;
         }
 
-        blobUrlCache.set(file, {
+        blobUrlCache.set(objectKey, {
           objectUrl,
           createdAt: Date.now(),
           lastUsedAt: Date.now(),
         });
         evictBlobCacheIfNeeded();
         setUrl(objectUrl);
+        if (meta) onResolvedMetadata?.(asset.assetId, meta);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -207,7 +368,19 @@ function useAssetImageUrl(asset: AlbumAsset, refreshToken = 0) {
       cancelled = true;
       abort.abort();
     };
-  }, [file, fallback, refreshToken]);
+  }, [
+    file,
+    cipherFile,
+    fallback,
+    refreshToken,
+    asset.assetId,
+    asset.zoneId,
+    asset.nonceB64,
+    asset.mime,
+    asset.aad,
+    keySession?.zones,
+    onResolvedMetadata,
+  ]);
 
   return url;
 }
@@ -219,6 +392,7 @@ export default function Album() {
   const [guestNickname, setGuestNickname] = useState("");
   const [mode, setMode] = useState<AlbumViewMode>("time");
   const [manifest, setManifest] = useState<AlbumManifest | null>(null);
+  const [resolvedMetaById, setResolvedMetaById] = useState<Record<string, AssetResolvedMetadata>>({});
   const [error, setError] = useState<string | null>(null);
 
   const displayName = useMemo(() => {
@@ -255,10 +429,11 @@ export default function Album() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setResolvedMetaById({});
     fetchAlbumManifestOrThrow()
       .then((data) => {
         if (cancelled) return;
-        setManifest(data);
+        setManifest(data as AlbumManifest);
         setVisibleCount(BATCH_SIZE);
       })
       .catch((e: unknown) => {
@@ -273,9 +448,42 @@ export default function Album() {
   const timeSorted = useMemo(() => {
     const assets = manifest?.assets ?? [];
     return [...assets]
-      .map((a) => ({ ...a, _takenAtTs: toTs(a.takenAt) }))
+      .map((a) => {
+        const extra = resolvedMetaById[a.assetId];
+        const merged: AlbumAsset = {
+          ...a,
+          ...extra,
+          world: extra?.world ?? a.world,
+          takenAt: extra?.takenAt ?? inferTakenAt(a),
+        };
+        return { ...merged, _takenAtTs: toTs(merged.takenAt) };
+      })
       .sort((a, b) => b._takenAtTs - a._takenAtTs);
-  }, [manifest]);
+  }, [manifest, resolvedMetaById]);
+
+  const handleResolvedMetadata = useMemo(
+    () => (assetId: string, meta: AssetResolvedMetadata) => {
+      setResolvedMetaById((prev) => {
+        const cur = prev[assetId];
+        const next: AssetResolvedMetadata = {
+          takenAt: meta.takenAt || cur?.takenAt,
+          world: {
+            worldId: meta.world?.worldId ?? cur?.world?.worldId ?? null,
+            worldName: meta.world?.worldName ?? cur?.world?.worldName ?? null,
+          },
+        };
+        if (
+          cur?.takenAt === next.takenAt &&
+          cur?.world?.worldId === next.world?.worldId &&
+          cur?.world?.worldName === next.world?.worldName
+        ) {
+          return prev;
+        }
+        return { ...prev, [assetId]: next };
+      });
+    },
+    [],
+  );
 
   const indexById = useMemo(() => {
     const map = new Map<string, number>();
@@ -471,11 +679,13 @@ export default function Album() {
             <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-950/30 p-4 text-sm text-red-100">
               {error}
               <div className="mt-2 text-xs text-red-200/80">
-                清单仅在上传 OSS 时：请在构建环境设置 <code className="rounded bg-black/30 px-1 py-0.5">VITE_ALBUM_MANIFEST_URL</code>{" "}
-                为 OSS 上该文件的完整 HTTPS URL，并重新构建部署。若清单在根路径{" "}
-                <code className="rounded bg-black/30 px-1 py-0.5">manifest.json</code>
-                ，变量须指向该 URL；若在 <code className="rounded bg-black/30 px-1 py-0.5">albums/manifest.json</code>
-                ，则指向对应 URL。
+                清单默认与图片相同经函数计算换取临时 URL（对象键默认{" "}
+                <code className="rounded bg-black/30 px-1 py-0.5">albums/manifest.json</code>
+                ，可用 <code className="rounded bg-black/30 px-1 py-0.5">VITE_ALBUM_MANIFEST_FILE</code>
+                覆盖）。若需改为直链，请设置有效的完整 HTTPS{" "}
+                <code className="rounded bg-black/30 px-1 py-0.5">VITE_ALBUM_MANIFEST_URL</code>
+                （勿填单独一个 <code className="rounded bg-black/30 px-1 py-0.5">/</code>
+                ）；仅在不走签名服务时才使用该变量。
               </div>
             </div>
           ) : null}
@@ -503,7 +713,7 @@ export default function Album() {
                       title={a.world?.worldName ?? a.world?.worldId ?? "世界未知"}
                     >
                       <div className="relative aspect-[4/3] w-full bg-black/20">
-                        <TimeCardImage asset={a} />
+                        <TimeCardImage asset={a} onResolvedMetadata={handleResolvedMetadata} />
                       </div>
                       <div className="flex flex-col gap-0.5 px-3 py-2 text-left">
                         <div className="truncate text-[11px] font-extrabold text-white/85">
@@ -614,7 +824,7 @@ export default function Album() {
                               className="group overflow-hidden rounded-2xl border border-white/10 bg-black/10"
                             >
                               <div className="relative aspect-[4/3] w-full bg-black/20">
-                                <TimeCardImage asset={a} />
+                                <TimeCardImage asset={a} onResolvedMetadata={handleResolvedMetadata} />
                               </div>
                               <div className="px-3 py-2 text-left text-[11px] font-extrabold text-white/80">
                                 {formatTs(a._takenAtTs)}
@@ -749,6 +959,28 @@ export default function Album() {
                       <span className="font-extrabold">{active.file}</span>
                     </button>
                   ) : null}
+                  {active.cipherFile ? (
+                    <button
+                      type="button"
+                      className="text-left hover:text-white"
+                      title="点击复制"
+                      onClick={() => void copyText(active.cipherFile ?? "", "cipherFile")}
+                    >
+                      <span className="text-white/60">cipherFile：</span>
+                      <span className="font-extrabold">{active.cipherFile}</span>
+                    </button>
+                  ) : null}
+                  {active.zoneId ? (
+                    <button
+                      type="button"
+                      className="text-left hover:text-white"
+                      title="点击复制"
+                      onClick={() => void copyText(active.zoneId ?? "", "zoneId")}
+                    >
+                      <span className="text-white/60">zoneId：</span>
+                      <span className="font-extrabold">{active.zoneId}</span>
+                    </button>
+                  ) : null}
                   {active.file ? (
                     <button
                       type="button"
@@ -757,7 +989,7 @@ export default function Album() {
                       onClick={() => {
                         const file = active.file?.trim();
                         if (!file) return setToast("无 file 可获取链接");
-                        void fetchSignedUrl(file)
+                        void fetchSignedUrlForOssObject(file)
                           .then((url) => {
                             if (!url) return setToast("获取链接失败");
                             return copyText(url, "临时链接");
@@ -806,7 +1038,7 @@ export default function Album() {
             ) : null}
 
             <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/30">
-              <ActiveImage asset={active} />
+              <ActiveImage asset={active} onResolvedMetadata={handleResolvedMetadata} />
             </div>
           </div>
         </div>
@@ -823,9 +1055,16 @@ export default function Album() {
   );
 }
 
-function TimeCardImage({ asset }: { asset: AlbumAsset }) {
+function TimeCardImage({
+  asset,
+  onResolvedMetadata,
+}: {
+  asset: AlbumAsset;
+  onResolvedMetadata?: (assetId: string, meta: AssetResolvedMetadata) => void;
+}) {
   const [retry, setRetry] = useState(0);
-  const url = useAssetImageUrl(asset, retry);
+  const url = useAssetImageUrl(asset, retry, onResolvedMetadata);
+  const objectKey = asset.file?.trim() || asset.cipherFile?.trim() || "";
   // 保持现有视觉：未拿到 url 时显示背景，不额外加新 UI
   return url ? (
     <img
@@ -834,29 +1073,34 @@ function TimeCardImage({ asset }: { asset: AlbumAsset }) {
       loading="lazy"
       className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
       onError={() => {
-        const file = asset.file?.trim();
-        if (!file) return;
+        if (!objectKey) return;
         if (retry >= 1) return;
-        signedUrlCache.delete(file);
+        invalidateSignedUrlCacheForObjectKey(objectKey);
         setRetry(1);
       }}
     />
   ) : null;
 }
 
-function ActiveImage({ asset }: { asset: AlbumAsset }) {
+function ActiveImage({
+  asset,
+  onResolvedMetadata,
+}: {
+  asset: AlbumAsset;
+  onResolvedMetadata?: (assetId: string, meta: AssetResolvedMetadata) => void;
+}) {
   const [retry, setRetry] = useState(0);
-  const url = useAssetImageUrl(asset, retry);
+  const url = useAssetImageUrl(asset, retry, onResolvedMetadata);
+  const objectKey = asset.file?.trim() || asset.cipherFile?.trim() || "";
   return url ? (
     <img
       src={url}
       alt={asset.assetId}
       className="max-h-[80vh] w-full object-contain"
       onError={() => {
-        const file = asset.file?.trim();
-        if (!file) return;
+        if (!objectKey) return;
         if (retry >= 1) return;
-        signedUrlCache.delete(file);
+        invalidateSignedUrlCacheForObjectKey(objectKey);
         setRetry(1);
       }}
     />
