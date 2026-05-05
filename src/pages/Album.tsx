@@ -132,12 +132,12 @@ function evictBlobCacheIfNeeded() {
 }
 
 async function fetchAsBlobUrl(signedUrl: string, mimeFallback?: string) {
-  // OSS Bucket 可能开启了 Referer 防盗链策略；浏览器默认会携带 Referer，导致 403：
-  // <Message>You are denied by bucket referer policy.</Message>
-  // 这里显式关闭 Referer 发送（只影响这次请求，不改变 UI）。
+  // OSS 防盗链若配置「不允许空 Referer」，使用 no-referrer 会不带 Referer → 403。
+  // strict-origin-when-cross-origin：跨域请求只发送当前页面的 origin（如 https://vrchat.kozakemi.top），
+  // 需与控制台 Referer 白名单一致；本地 localhost 开发时请在白名单中加入对应来源或临时允许空 Referer。
   const res = await fetch(signedUrl, {
     cache: "no-store",
-    referrerPolicy: "no-referrer",
+    referrerPolicy: "strict-origin-when-cross-origin",
   });
   if (!res.ok) throw new Error(`图片请求失败：HTTP ${res.status}`);
   const mime = res.headers.get("content-type") || mimeFallback || "application/octet-stream";
