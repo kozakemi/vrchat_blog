@@ -1,20 +1,19 @@
-/**
- * 开发模式下将 OSS 外网域名改写为 Vite 同源代理前缀（见 vite.config.ts server.proxy），
- * 避免浏览器对 oss.aliyuncs.com 发起跨域 PUT/GET 时被 CORS 拦截。
- * 生产构建不受影响。
- */
-const HOST_TO_PREFIX: Record<string, string> = {
-  "vrchat-png.oss-cn-beijing.aliyuncs.com": "/dev-oss-proxy/vrchat-png",
-  "vrchat-img.oss-cn-beijing.aliyuncs.com": "/dev-oss-proxy/vrchat-img",
-};
+import { resolveSignedUrlToAbsolute } from "@/lib/ossSignedUrl";
 
+/** 开发代理路径前缀：/dev-oss-proxy/<oss-hostname>/object/path */
+export const DEV_OSS_PROXY_PREFIX = "/dev-oss-proxy";
+
+/**
+ * 开发模式下将 OSS 外网域名改写为 Vite 同源代理路径（见 vite.config.ts），
+ * 避免浏览器对 oss.aliyuncs.com 发起跨域 PUT/GET 时被 CORS 拦截。
+ * 生产构建返回已补全的绝对 URL，不经代理。
+ */
 export function rewriteOssUrlForDevFetch(url: string): string {
-  if (!import.meta.env.DEV) return url;
+  const absolute = resolveSignedUrlToAbsolute(url);
+  if (!import.meta.env.DEV) return absolute;
   try {
-    const u = new URL(url);
-    const prefix = HOST_TO_PREFIX[u.hostname.toLowerCase()];
-    if (!prefix) return url;
-    return `${prefix}${u.pathname}${u.search}`;
+    const u = new URL(absolute);
+    return `${DEV_OSS_PROXY_PREFIX}/${u.hostname}${u.pathname}${u.search}`;
   } catch {
     return url;
   }
