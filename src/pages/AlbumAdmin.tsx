@@ -319,15 +319,12 @@ export default function AlbumAdmin() {
           const { row, cipherBytes, ossKey } = await encryptQueueItem(item, zone);
           newManifestAssets.push(row);
 
-          const putUrl = await resolvePutSignedUrl(ossKey, ossCfg, "application/octet-stream");
-          if (putUrl) {
-            try {
-              await putObjectWithSignedUrl(putUrl, cipherBytes, "application/octet-stream");
-            } catch {
-              binUploadFailures.push(ossKey);
-            }
-          } else {
-            binUploadFailures.push(ossKey);
+          try {
+            const putUrl = await resolvePutSignedUrl(ossKey, ossCfg, "application/octet-stream");
+            await putObjectWithSignedUrl(putUrl, cipherBytes, "application/octet-stream");
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            binUploadFailures.push(`${ossKey}: ${msg}`);
           }
         }
 

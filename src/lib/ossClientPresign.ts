@@ -2,8 +2,10 @@ import type { OssUploadConfig } from "./ossTypes";
 
 function endpointToRegion(endpoint: string): string {
   const host = endpoint.replace(/^https?:\/\//i, "").split("/")[0].toLowerCase();
-  const m = host.match(/^(oss-[a-z0-9-]+)\.aliyuncs\.com$/);
-  if (m) return m[1];
+  const regional = host.match(/^(oss-[a-z0-9-]+)\.aliyuncs\.com$/);
+  if (regional) return regional[1];
+  const vhost = host.match(/^[a-z0-9-]+\.(oss-[a-z0-9-]+)\.aliyuncs\.com$/);
+  if (vhost) return vhost[1];
   if (host.startsWith("oss-")) return host.split(".")[0] ?? "oss-cn-beijing";
   return "oss-cn-beijing";
 }

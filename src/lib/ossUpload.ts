@@ -1,7 +1,7 @@
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { getPutPresignedUrlWithConfig } from "@/lib/ossClientPresign";
 import type { OssUploadConfig } from "@/lib/ossTypes";
-import { normalizeSignedUrl } from "@/lib/ossSignedUrl";
+import { ossBucketPublicOrigin, resolveSignedUrlToAbsolute } from "@/lib/ossSignedUrl";
 
 type PutSignResponse = {
   signedUrl?: string;
@@ -23,7 +23,7 @@ export async function fetchPutSignedUrl(objectKey: string): Promise<string | nul
   const data = (await res.json()) as PutSignResponse;
   const raw = data.signedUrl?.trim();
   if (!raw) return null;
-  return normalizeSignedUrl(String(raw));
+  return resolveSignedUrlToAbsolute(String(raw));
 }
 
 /**
@@ -39,7 +39,9 @@ export async function resolvePutSignedUrl(
   contentType = "application/octet-stream",
 ): Promise<string> {
   if (clientConfig) {
-    return await getPutPresignedUrlWithConfig(objectKey, clientConfig, contentType);
+    const origin = ossBucketPublicOrigin(clientConfig.oss_bucket_name, clientConfig.oss_endpoint);
+    const url = await getPutPresignedUrlWithConfig(objectKey, clientConfig, contentType);
+    return resolveSignedUrlToAbsolute(url, origin);
   }
   const u = await fetchPutSignedUrl(objectKey);
   if (!u) {
@@ -47,7 +49,7 @@ export async function resolvePutSignedUrl(
       "未配置 OSS 网页 JSON，且签名服务未返回 PUT 地址（请部署 VITE_OSS_SIGN_ENDPOINT 的 put=1 接口）",
     );
   }
-  return u;
+  return resolveSignedUrlToAbsolute(u);
 }
 
 export async function putObjectWithSignedUrl(
@@ -55,7 +57,7 @@ export async function putObjectWithSignedUrl(
   body: Blob | ArrayBuffer | Uint8Array,
   contentType: string,
 ): Promise<void> {
-  const fetchUrl = rewriteOssUrlForDevFetch(putUrl);
+  const fetchUrl = rewriteOssUrlForDevFetch(resolveSignedUrlToAbsolute(putUrl));
   const res = await fetch(fetchUrl, {
     method: "PUT",
     body,

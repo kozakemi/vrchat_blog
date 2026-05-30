@@ -9,18 +9,20 @@ export default defineConfig({
   build: {
     sourcemap: 'hidden',
   },
-  /** 开发时 OSS 未配置 localhost CORS 会导致 PUT/OPTIONS 失败；经代理变为同源请求 */
+  /** 开发时 OSS PUT/GET 经同源代理，路径 /dev-oss-proxy/<bucket-host>/... */
   server: {
     proxy: {
-      "/dev-oss-proxy/vrchat-png": {
+      "/dev-oss-proxy": {
         target: "https://vrchat-png.oss-cn-beijing.aliyuncs.com",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/dev-oss-proxy\/vrchat-png/, ""),
-      },
-      "/dev-oss-proxy/vrchat-img": {
-        target: "https://vrchat-img.oss-cn-beijing.aliyuncs.com",
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/dev-oss-proxy\/vrchat-img/, ""),
+        secure: true,
+        router(req) {
+          const path = req.url ?? "";
+          const m = path.match(/^\/dev-oss-proxy\/([^/]+)/);
+          if (m?.[1]) return `https://${m[1]}`;
+          return "https://vrchat-png.oss-cn-beijing.aliyuncs.com";
+        },
+        rewrite: (path) => path.replace(/^\/dev-oss-proxy\/[^/]+/, "") || "/",
       },
     },
   },
