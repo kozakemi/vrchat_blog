@@ -118,6 +118,44 @@ OSS 使用对象键前缀表示文件夹，写入文件时会自动形成目录�
 - 若显示"明文对象（未加密）"，说明该条目走的是 `file` 而非 `cipherFile`，
   没有加密保护，任何知道对象键的人都能取到原图。
 
+## 🧪 本地预览与测试
+
+### 本地预览页面效果（不连阿里云）
+
+```bash
+npm run local
+```
+
+一条命令把站点跑起来，用来**看页面效果**。相册的清单与图片本来都在 OSS 上、还要经函数计算签名，本地不连阿里云时相册页只会报错、什么都看不到。演示模式解决了这件事：
+
+- 关掉签名服务（`.env.demo` 里 `VITE_OSS_SIGN_ENDPOINT=off`），清单改走同源直链；
+- 由 `vite.config.demo.ts` 把 `demo/` 挂到开发服务器上，**不放进 `public/`**，所以演示数据不会进线上产物；
+- 演示清单里全是**明文占位图**（只用 `src` 字段，不走加密），因此不需要任何密钥、任何网络请求，网格 / 灯箱 / 「更多」面板都能填满。
+
+`demo/images/` 里的占位图由 `node tools/make-demo-images.mjs` **确定性生成**（零依赖手写 PNG），已加入 `.gitignore`——生成器在仓库里，`npm run local` 会自动补齐。
+
+启动后按屏幕提示登录即可：导入 `demo/key.json`（带 admin 角色、含 `public-v1` 与 `demo-vault-v1` 两个区），或直接「注册」一个昵称（只有公开区）。**演示模式不能上传 / 删除 / 改归属 Zone**——这三件事都要真实 OSS 签名，按钮仍会显示，点了会给出明确报错。
+
+数据与配置的一致性由 `npm run test:local-demo` 钉住：`.env.demo` 是否真的生效、清单里每张图是否都会被生成、清单的 Zone 与演示密钥是否一一对应、以及"关掉演示私密区后每个世界分组各少一张"。
+
+### 测试
+
+各套测试都是本地 node 脚本，用内存桩替代 OSS 与浏览器，**不联网、不碰线上数据**：
+
+| 命令 | 覆盖 |
+|------|------|
+| `npm run check` / `npm run lint` / `npm run build` | 类型检查、代码风格、构建 |
+| `npm run test:album-access` | Zone 准入判定（含"只要声明了 `zoneId` 就必须持有密钥"） |
+| `npm run test:album-delete` | 删除顺序（先改清单、后删密文）与孤儿对象处理 |
+| `npm run test:album-zone-change` | 改归属 Zone：重新加密、绝不就地覆盖、失败可恢复 |
+| `npm run test:zone-visibility` | Zone 显示开关：只做减法、存储里无密钥字节、降级路径 |
+| `npm run test:album-metadata` | 解析结果逐字段合并（曾经丢过宽高与解密密钥指纹） |
+| `npm run test:session-persist` | 登录态持久化（用全新模块图模拟刷新页面） |
+| `npm run test:key-fingerprint` | 跨密钥文件的同名 Zone 指纹比对 |
+| `npm run test:image-size` | PNG / GIF / JPEG / WebP 尺寸解析 |
+| `npm run test:album-empty` | 空桶初始化，以及"不把读取失败当成空桶" |
+| `npm run test:local-demo` | 本地预览的演示数据与配置一致性 |
+
 ## 📅 开发计划
 
 - [x] 静态首页搭建
@@ -127,6 +165,11 @@ OSS 使用对象键前缀表示文件夹，写入文件时会自动形成目录�
 - [x] 增加相册与回忆录板块
 - [x] 移除首屏入口页与转场动画，收敛为单一登录页
 - [x] 登录态持久化（localStorage），刷新与重开浏览器不再掉登录
+- [x] 管理员删除照片（先改清单、后删密文，不可恢复）
+- [x] 管理员修改照片归属 Zone（重新加密迁移）
+- [x] 相册按 Zone 勾选显示（纯界面筛选，按密钥文件记住）
+- [x] 关于页与站点图标
+- [x] 本地预览（演示数据，不连阿里云即可看页面效果）
 - [ ] 把清单合并搬到服务端串行执行（消除并发上传覆盖）
 
 ## 📄 许可证与版权说明

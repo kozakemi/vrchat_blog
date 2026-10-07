@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "local": "node tools/local-preview.mjs",
+    "demo:images": "node tools/make-demo-images.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -18,6 +20,7 @@
     "test:album-zone-change": "node tools/album-zone-change-test.mjs",
     "test:session-persist": "node tools/session-persist-test.mjs",
     "test:zone-visibility": "node tools/zone-visibility-test.mjs",
+    "test:local-demo": "node tools/local-demo-test.mjs",
     "test:key-fingerprint": "node tools/key-fingerprint-test.mjs",
     "test:album-metadata": "node tools/album-metadata-test.mjs"
   },

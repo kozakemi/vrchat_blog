@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "username": "本地预览",
+  "roles": ["admin"],
+  "comment": "仅供本地预览使用的演示密钥文件：图片全是明文占位图，密钥没有保护任何真实内容。",
+  "zones": [
+    {
+      "zoneId": "public-v1",
+      "keyB64": "qIbccWS8pHQB4jIGWO8Q4woXShP6NlQeXsbaAe3KXFM=",
+      "comment": "公开区（与线上同一把，本来就是公开的）"
+    },
+    {
+      "zoneId": "demo-vault-v1",
+      "keyB64": "ZGVtby1vbmx5LWtleS1ub3QtcmVhbC0wMDAwMDAwMDA=",
+      "comment": "演示用私密区（不是真密钥）"
+    }
+  ],
+  "createdAt": "2026-04-06T00:00:00.000Z"
+}

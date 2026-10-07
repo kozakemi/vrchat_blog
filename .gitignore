@@ -15,6 +15,10 @@ dist-ssr
 # Local-only key material (do not commit)
 keys/
 
+# 本地预览用的演示图片：由 tools/make-demo-images.mjs 确定性地生成，不进仓库
+# （生成器已提交，跑 npm run local 会自动补齐）
+demo/images/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
