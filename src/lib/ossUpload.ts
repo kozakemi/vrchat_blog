@@ -87,7 +87,9 @@ export async function resolveDeleteSignedUrl(
 /**
  * 用 DELETE 预签名删除 OSS 对象。
  *
- * - 404 视为成功（对象本就不在，"彻底删除"应当幂等）；
+ * - OSS 的 DeleteObject 是幂等的：**删除不存在的对象同样返回 204**（实测确认），
+ *   所以一般情况下无法区分"删掉了"和"本来就没有"。`alreadyGone` 只在服务端
+ *   确实回了 404 时才为 true（例如经过了某些代理/网关），调用方不应依赖它做判断。
  * - 预检被拒时浏览器只抛网络错误，读不到 OSS 的 XML 正文，因此这里给出明确的 CORS 指引。
  */
 export async function deleteObjectWithSignedUrl(

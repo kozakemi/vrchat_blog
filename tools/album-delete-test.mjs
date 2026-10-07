@@ -196,6 +196,8 @@ await test("密文本就不在（404）→ 幂等成功", async () => {
   seed();
   objects.delete("albums/assets/a_del.bin");
   const report = await deleteAlbumAsset(config, TARGET);
+  // 注意：真实 OSS 的 DeleteObject 对不存在的对象返回 204（幂等），不会给 404。
+  // 这里桩故意回 404，用来覆盖"服务端确实回报不存在"这一分支；生产上不依赖它。
   assert.equal(report.objectAlreadyGone, true);
   assert.equal(report.objectDeleted, false);
   assert.equal(report.warning, undefined);
