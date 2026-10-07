@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import type { KeyFileZoneV1 } from "@/lib/keyFile";
+import { detectLocalStorage, isLocalStorageAvailable } from "@/lib/localStore";
 
 export type KeySessionState = {
   username: string;
@@ -18,24 +19,13 @@ type SessionAuthStore = {
 export const SESSION_STORAGE_KEY = "td_key_session_v1";
 
 /**
- * 探测 localStorage 是否**真的可写**。
+ * 探测 localStorage 是否**真的可写**的实现已移到 `src/lib/localStore.ts`：
+ * 「记住登录态」和「记住 Zone 显示开关」是同一件事，不该各写一份探测逻辑。
  *
- * Safari 隐私模式、浏览器"阻止所有 Cookie"、企业策略等情况下，
- * `localStorage` 存在但 `setItem` 会抛错；此时若直接交给 persist，
- * 它会静默失败 —— 表现为"每次刷新都要重新登录"，而且没有任何提示。
- * 所以这里先探测，再把结果暴露给界面，让使用者知道原因。
+ * 背景（别删这段）：Safari 隐私模式、浏览器"阻止所有 Cookie"、企业策略等情况下，
+ * `localStorage` 存在但 `setItem` 会抛错；此时若直接交给 persist，它会静默失败 ——
+ * 表现为"每次刷新都要重新登录"，而且没有任何提示。
  */
-function detectLocalStorage(): Storage | null {
-  try {
-    if (typeof localStorage === "undefined") return null;
-    const probe = "__td_ls_probe__";
-    localStorage.setItem(probe, "1");
-    localStorage.removeItem(probe);
-    return localStorage;
-  } catch {
-    return null;
-  }
-}
 
 /** localStorage 不可用时使用的空实现：让会话退回"仅内存"，并且不抛错 */
 const noopStorage: StateStorage = {
@@ -46,7 +36,7 @@ const noopStorage: StateStorage = {
 
 /** 当前环境能否持久化登录态；界面据此提示使用者 */
 export function isSessionPersistenceAvailable(): boolean {
-  return detectLocalStorage() !== null;
+  return isLocalStorageAvailable();
 }
 
 function isValidZone(z: unknown): z is KeyFileZoneV1 {

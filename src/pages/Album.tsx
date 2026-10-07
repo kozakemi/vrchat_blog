@@ -24,6 +24,15 @@ import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { fetchSignedUrlForOssObject, invalidateSignedUrlCacheForObjectKey } from "@/lib/ossSignFetch";
 import { loadOssConfigFromSession } from "@/lib/ossUploadConfig";
 import { cn } from "@/lib/utils";
+import {
+  applyZoneVisibility,
+  clearZoneVisibility,
+  countAssetsByZone,
+  loadZoneVisibility,
+  saveZoneVisibility,
+  zoneVisibilityScope,
+  type ZoneVisibility,
+} from "@/lib/zoneVisibility";
 import { AlertCircle, Download, FolderInput, Trash2 } from "lucide-react";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
@@ -427,6 +436,12 @@ export default function Album() {
   /** 非空表示"迁移成功但旧文件没删掉"，确认框改为只展示说明 */
   const [zoneResult, setZoneResult] = useState<string | null>(null);
 
+  /**
+   * Zone 显示开关：**纯界面筛选，只影响当前浏览者**。
+   * 它不参与权限判定、不改清单、不影响别人（见 lib/zoneVisibility 里的说明）。
+   */
+  const [zoneVisibility, setZoneVisibility] = useState<ZoneVisibility>({});
+
   // 轻量提示（复制到剪贴板）
   const [toast, setToast] = useState<string | null>(null);
 
@@ -467,6 +482,20 @@ export default function Album() {
   }, [sessionKey]);
 
   /**
+   * Zone 开关的作用域：用户名 + 该密钥文件里的 Zone 集合。
+   * 换用户、或换一份 Zone 集合不同的密钥文件都会得到新作用域，
+   * 因此不会把上一个人的隐藏设置带过来（代价是增删 Zone 会回到"全部显示"）。
+   */
+  const zoneScope = useMemo(
+    () => zoneVisibilityScope(keySession?.username, keySession?.zones),
+    [keySession?.username, keySession?.zones],
+  );
+
+  useEffect(() => {
+    setZoneVisibility(loadZoneVisibility(zoneScope, keySession?.zones));
+  }, [zoneScope, keySession?.zones]);
+
+  /**
    * 只渲染当前身份有权查看的资源。
    * 不能直接把清单里的 assets 全渲染出来：无权资源的**文件名、拍摄时间、世界名**
    * 会照样出现在页面上——图片解不开，但元数据已经泄露了。
@@ -477,8 +506,17 @@ export default function Album() {
   );
   const hiddenCount = (manifest?.assets.length ?? 0) - accessibleAssets.length;
 
+  /**
+   * Zone 开关只做减法：在"有权查看"的集合里再筛掉被关掉的 Zone。
+   * **顺序不可颠倒**——先鉴权、后筛选。反过来的话，界面开关就成了权限开关。
+   */
+  const zoneFilteredAssets = useMemo(
+    () => applyZoneVisibility(accessibleAssets, zoneVisibility),
+    [accessibleAssets, zoneVisibility],
+  );
+
   const timeSorted = useMemo(() => {
-    const assets = accessibleAssets;
+    const assets = zoneFilteredAssets;
     return [...assets]
       .map((a) => {
         const extra = resolvedMetaById[a.assetId];
@@ -491,7 +529,38 @@ export default function Album() {
         return { ...merged, _takenAtTs: toTs(merged.takenAt) };
       })
       .sort((a, b) => b._takenAtTs - a._takenAtTs);
-  }, [accessibleAssets, resolvedMetaById]);
+  }, [zoneFilteredAssets, resolvedMetaById]);
+
+  /**
+   * 当前大图被筛掉时收起灯箱。
+   * 不加这一步的话，关掉某个 Zone 后 activeIndex 会指向一个已不存在的条目，
+   * 灯箱会凭空消失、Escape 之外没有任何办法退出。
+   */
+  useEffect(() => {
+    if (activeIndex === null) return;
+    if (timeSorted[activeIndex]) return;
+    setActiveIndex(null);
+  }, [activeIndex, timeSorted]);
+
+  /**
+   * Zone 开关列表：只列**当前会话持有、且确实有照片**的 Zone。
+   * 数量按"有权查看"的集合统计，而不是筛过之后的 —— 否则关掉一个 Zone，它就消失了，
+   * 再也没有办法把它打开。
+   */
+  const zoneFilters = useMemo(() => {
+    const counts = countAssetsByZone(accessibleAssets);
+    return (keySession?.zones ?? [])
+      .map((z) => ({
+        zoneId: z.zoneId,
+        comment: z.comment,
+        count: counts.get(z.zoneId) ?? 0,
+        visible: zoneVisibility[z.zoneId] !== false,
+      }))
+      .filter((z) => z.count > 0);
+  }, [accessibleAssets, keySession?.zones, zoneVisibility]);
+
+  /** 被 Zone 开关筛掉的数量（用于提示"有几张没显示"） */
+  const hiddenByZoneCount = accessibleAssets.length - zoneFilteredAssets.length;
 
   const handleResolvedMetadata = useMemo(
     () => (assetId: string, meta: AssetResolvedMetadata) => {
@@ -773,6 +842,23 @@ export default function Album() {
     }
   }
 
+  /**
+   * 勾选/取消某个 Zone 的显示。
+   * 这是**纯界面筛选**：不改权限、不改清单、不影响别人，只决定自己看不看得到。
+   */
+  function setZoneShown(zoneId: string, shown: boolean) {
+    const next: ZoneVisibility = { ...zoneVisibility, [zoneId]: shown };
+    setZoneVisibility(next);
+    saveZoneVisibility(zoneScope, next);
+  }
+
+  function showAllZones() {
+    const next: ZoneVisibility = {};
+    for (const z of keySession?.zones ?? []) next[z.zoneId] = true;
+    setZoneVisibility(next);
+    clearZoneVisibility(zoneScope);
+  }
+
   /** 下载当前大图：直接复用已解密并展示中的 Blob URL，不重新下载 */
   function downloadActiveImage() {
     if (!active || !activeBlobUrl || !canDownloadActive) {
@@ -875,6 +961,46 @@ export default function Album() {
         </div>
       </header>
 
+      {/*
+        Zone 显示开关。只在"确实有多于一个 Zone 可选"时出现——只有一个 Zone 时，
+        一个勾选框没有任何意义，只是噪声。
+      */}
+      {zoneFilters.length > 1 ? (
+        <div className="relative z-10 flex flex-wrap items-center gap-2 px-4 pb-2">
+          <span className="text-[11px] font-bold tracking-wide text-white/45">显示 Zone</span>
+          {zoneFilters.map((z) => (
+            <label
+              key={z.zoneId}
+              title={z.comment ? `${z.zoneId} — ${z.comment}` : z.zoneId}
+              className={cn(
+                "inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold backdrop-blur transition-colors",
+                z.visible
+                  ? "border-white/20 bg-black/25 text-white/85 hover:bg-black/35"
+                  : "border-white/10 bg-black/10 text-white/40 hover:bg-black/20",
+              )}
+            >
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-amber-400"
+                checked={z.visible}
+                onChange={(e) => setZoneShown(z.zoneId, e.currentTarget.checked)}
+              />
+              <span className="font-mono">{z.zoneId}</span>
+              <span className={z.visible ? "text-white/45" : "text-white/25"}>{z.count}</span>
+            </label>
+          ))}
+          {hiddenByZoneCount > 0 ? (
+            <button
+              type="button"
+              className="rounded-xl border border-amber-400/40 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-extrabold text-amber-100 hover:bg-amber-500/25"
+              onClick={showAllZones}
+            >
+              已隐藏 {hiddenByZoneCount} 张 · 全部显示
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       <main ref={scrollRef} className="relative z-10 flex-1 overflow-auto px-4 pb-6">
         <div className="mx-auto w-full max-w-6xl">
           {error ? (
@@ -895,7 +1021,12 @@ export default function Album() {
             <>
               <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-white/70">
                 <div>
-                  共 <span className="font-extrabold text-white/90">{accessibleAssets.length}</span> 张
+                  共 <span className="font-extrabold text-white/90">{timeSorted.length}</span> 张
+                  {hiddenByZoneCount > 0 ? (
+                    <span className="ml-2 text-white/45">
+                      （另有 {hiddenByZoneCount} 张被上方的 Zone 开关隐藏）
+                    </span>
+                  ) : null}
                   {hiddenCount > 0 ? (
                     <span className="ml-2 text-white/45">
                       （另有 {hiddenCount} 张不在当前身份的权限内）
@@ -904,11 +1035,13 @@ export default function Album() {
                 </div>
               </div>
 
-              {accessibleAssets.length === 0 ? (
+              {timeSorted.length === 0 ? (
                 <div className="mt-10 text-center text-sm font-bold text-white/70">
-                  {hiddenCount > 0
-                    ? "这里的照片不在当前身份的权限内。"
-                    : "相册暂无照片，管理员上传后会自动显示。"}
+                  {hiddenByZoneCount > 0
+                    ? "这些照片都被上方的 Zone 开关隐藏了，点「全部显示」就能看到。"
+                    : hiddenCount > 0
+                      ? "这里的照片不在当前身份的权限内。"
+                      : "相册暂无照片，管理员上传后会自动显示。"}
                 </div>
               ) : null}
 
