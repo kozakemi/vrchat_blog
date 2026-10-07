@@ -63,6 +63,7 @@ const localMod = await server.ssrLoadModule("/src/lib/localStore.ts");
 const {
   ZONE_VISIBILITY_STORAGE_KEY,
   applyZoneVisibility,
+  buildZoneFilterOptions,
   clearZoneVisibility,
   countAssetsByZone,
   isZoneVisible,
@@ -334,6 +335,61 @@ await test("计数用的是「有权查看」的集合 → 关掉一个 Zone 之
   assert.equal(shown.length, 3, "被关掉的那 1 张不显示");
   // 若计数用的是 shown，vault-v1 会变成 0 条而被界面隐藏，就再也打不开了
   assert.equal(countAssetsByZone(accessible).get("vault-v1"), 1);
+});
+
+console.log("\n【7】界面开关列表：只列「确实有照片」的 Zone");
+await test("0 张的 Zone 不列出（勾了也没反应，列出来只会让人以为坏了）", () => {
+  const accessible = [
+    { assetId: "p1", zoneId: "public-v1" },
+    { assetId: "p2", zoneId: "public-v1" },
+  ];
+  const opts = buildZoneFilterOptions(ZONES_ADMIN, accessible, {});
+  assert.deepEqual(opts.map((o) => o.zoneId), ["public-v1"]);
+  assert.equal(opts[0].count, 2);
+});
+await test("复现线上那份清单的形状：164 张全在公开区 → 只给一个开关，整排隐藏", () => {
+  const bigPublic = Array.from({ length: 164 }, (_, i) => ({
+    assetId: `p${i}`,
+    zoneId: "public-v1",
+  }));
+  const opts = buildZoneFilterOptions(ZONES_ADMIN, bigPublic, {});
+  assert.equal(opts.length, 1, "没有可切换的对象，界面据此不显示整排开关");
+  assert.equal(opts[0].count, 164);
+});
+await test("一旦私密区有了照片，第二个开关会自己出现", () => {
+  const withVault = [
+    ...Array.from({ length: 164 }, (_, i) => ({ assetId: `p${i}`, zoneId: "public-v1" })),
+    { assetId: "v1", zoneId: "vault-v1" },
+  ];
+  const opts = buildZoneFilterOptions(ZONES_ADMIN, withVault, {});
+  assert.deepEqual(opts.map((o) => o.zoneId), ["public-v1", "vault-v1"]);
+  assert.deepEqual(opts.map((o) => o.count), [164, 1]);
+});
+await test("★ 不变量：被勾选关掉的 Zone 只要有照片，就仍在列表里（否则再也打不开）", () => {
+  const opts = buildZoneFilterOptions(ZONES_ADMIN, ASSETS, { "public-v1": true, "vault-v1": false });
+  const vault = opts.find((o) => o.zoneId === "vault-v1");
+  assert.ok(vault, "计数若改用「勾选后」的集合，这里会变成 0 条而被过滤掉");
+  assert.equal(vault.count, 1, "计数不受勾选状态影响");
+  assert.equal(vault.visible, false);
+});
+await test("只持有一个 Zone 且它有照片时只列一项", () => {
+  const opts = buildZoneFilterOptions(ZONES_GUEST, ASSETS, {});
+  assert.equal(opts.length, 1);
+  assert.equal(opts[0].zoneId, "public-v1");
+});
+await test("没有会话时不列任何项（不崩）", () => {
+  assert.deepEqual(buildZoneFilterOptions(undefined, ASSETS, {}), []);
+  assert.deepEqual(buildZoneFilterOptions([], ASSETS, {}), []);
+});
+await test("comment 原样带出（界面用作悬停提示）", () => {
+  const opts = buildZoneFilterOptions(ZONES_ADMIN, ASSETS, {});
+  assert.equal(opts.find((o) => o.zoneId === "public-v1").comment, "公开区");
+  assert.equal(opts.find((o) => o.zoneId === "vault-v1").comment, "核心区");
+});
+await test("没有 zoneId 的老条目不计入任何 Zone 的计数", () => {
+  const opts = buildZoneFilterOptions(ZONES_ADMIN, ASSETS, {});
+  const total = opts.reduce((n, o) => n + o.count, 0);
+  assert.equal(total, ASSETS.filter((a) => a.zoneId).length, "a_legacy 不该被算进任何 Zone");
 });
 
 delete globalThis.localStorage;

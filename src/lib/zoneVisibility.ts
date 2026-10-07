@@ -144,3 +144,42 @@ export function countAssetsByZone<T extends { zoneId?: string | null }>(
   }
   return counts;
 }
+
+export type ZoneFilterOption = {
+  zoneId: string;
+  comment?: string;
+  /** 该 Zone 下当前会话有权查看的资源数（按**鉴权后**的集合统计，与开关无关） */
+  count: number;
+  /** 当前是否勾选显示 */
+  visible: boolean;
+};
+
+/**
+ * 界面要显示哪些 Zone 开关，以及各自的计数与勾选状态。
+ *
+ * **只列"确实有照片"的 Zone**：一个 0 张的 Zone，勾不勾都没有任何区别，
+ * 列出来只会让人点了没反应、以为坏了。所以"密钥里有私密区、但还没往里放照片"时
+ * 整排开关不显示——这是**刻意**的，等那个 Zone 有了照片，开关会自己出现。
+ *
+ * ⚠️ **计数必须取自"鉴权后"的集合，而且与勾选状态无关。**
+ * 这是本函数唯一必须守住的不变量：若改用"勾选后"的集合统计，那么关掉一个 Zone
+ * 之后它立刻变成 0 条 → 被下面的 count > 0 过滤掉 → 用户再也无法把它打开。
+ *
+ * （历史：曾为了"可发现性"改成按密钥文件持有的 Zone 全列出、含 0 张。
+ * 实测下来"点了没反应的勾选框"比"暂时不出现"更让人困惑，已改回按照片数过滤。）
+ */
+export function buildZoneFilterOptions(
+  zones: KeyFileZoneV1[] | undefined,
+  accessibleAssets: { zoneId?: string | null }[],
+  visibility: ZoneVisibility,
+): ZoneFilterOption[] {
+  const counts = countAssetsByZone(accessibleAssets);
+  return (zones ?? [])
+    .map((z) => ({
+      zoneId: z.zoneId,
+      ...(z.comment ? { comment: z.comment } : {}),
+      count: counts.get(z.zoneId) ?? 0,
+      visible: visibility[z.zoneId] !== false,
+    }))
+    .filter((z) => z.count > 0);
+}

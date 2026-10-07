@@ -26,8 +26,8 @@ import { loadOssConfigFromSession } from "@/lib/ossUploadConfig";
 import { cn } from "@/lib/utils";
 import {
   applyZoneVisibility,
+  buildZoneFilterOptions,
   clearZoneVisibility,
-  countAssetsByZone,
   loadZoneVisibility,
   saveZoneVisibility,
   zoneVisibilityScope,
@@ -543,21 +543,14 @@ export default function Album() {
   }, [activeIndex, timeSorted]);
 
   /**
-   * Zone 开关列表：只列**当前会话持有、且确实有照片**的 Zone。
-   * 数量按"有权查看"的集合统计，而不是筛过之后的 —— 否则关掉一个 Zone，它就消失了，
-   * 再也没有办法把它打开。
+   * Zone 开关列表。规则见 `buildZoneFilterOptions`：**按会话持有的 Zone 决定**，
+   * 不按"有照片的 Zone"决定 —— 后者会让"刚建好私密区、还没放照片"时整排开关
+   * 都消失，而那正是想先把开关配好的时刻。
    */
-  const zoneFilters = useMemo(() => {
-    const counts = countAssetsByZone(accessibleAssets);
-    return (keySession?.zones ?? [])
-      .map((z) => ({
-        zoneId: z.zoneId,
-        comment: z.comment,
-        count: counts.get(z.zoneId) ?? 0,
-        visible: zoneVisibility[z.zoneId] !== false,
-      }))
-      .filter((z) => z.count > 0);
-  }, [accessibleAssets, keySession?.zones, zoneVisibility]);
+  const zoneFilters = useMemo(
+    () => buildZoneFilterOptions(keySession?.zones, accessibleAssets, zoneVisibility),
+    [keySession?.zones, accessibleAssets, zoneVisibility],
+  );
 
   /** 被 Zone 开关筛掉的数量（用于提示"有几张没显示"） */
   const hiddenByZoneCount = accessibleAssets.length - zoneFilteredAssets.length;
@@ -962,8 +955,9 @@ export default function Album() {
       </header>
 
       {/*
-        Zone 显示开关。只在"确实有多于一个 Zone 可选"时出现——只有一个 Zone 时，
-        一个勾选框没有任何意义，只是噪声。
+        Zone 显示开关。条件看的是**有照片的 Zone**（见 buildZoneFilterOptions）：
+        只有一个 Zone 有照片时没有可切换的对象，一个孤零零的勾选框只是噪声。
+        等私密区有了照片，第二个开关会自己出现。
       */}
       {zoneFilters.length > 1 ? (
         <div className="relative z-10 flex flex-wrap items-center gap-2 px-4 pb-2">
@@ -971,7 +965,10 @@ export default function Album() {
           {zoneFilters.map((z) => (
             <label
               key={z.zoneId}
-              title={z.comment ? `${z.zoneId} — ${z.comment}` : z.zoneId}
+              title={[
+                z.comment ? `${z.zoneId} — ${z.comment}` : z.zoneId,
+                z.count === 0 ? "这个 Zone 还没有照片" : `共 ${z.count} 张`,
+              ].join(" · ")}
               className={cn(
                 "inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold backdrop-blur transition-colors",
                 z.visible
@@ -986,7 +983,9 @@ export default function Album() {
                 onChange={(e) => setZoneShown(z.zoneId, e.currentTarget.checked)}
               />
               <span className="font-mono">{z.zoneId}</span>
-              <span className={z.visible ? "text-white/45" : "text-white/25"}>{z.count}</span>
+              <span className={z.visible && z.count > 0 ? "text-white/45" : "text-white/25"}>
+                {z.count}
+              </span>
             </label>
           ))}
           {hiddenByZoneCount > 0 ? (
