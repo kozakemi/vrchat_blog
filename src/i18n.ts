@@ -1,5 +1,11 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import albumZh from "@/locales/zh/album";
+import albumJa from "@/locales/ja/album";
+import albumEn from "@/locales/en/album";
+import adminZh from "@/locales/zh/admin";
+import adminJa from "@/locales/ja/admin";
+import adminEn from "@/locales/en/admin";
 
 const STORAGE_KEY = "td_lang";
 
@@ -58,6 +64,7 @@ i18n.use(initReactI18next).init({
         loggedInAs: "当前身份：{{name}}",
         logout: "退出登录",
         close: "关闭",
+        languageSwitch: "切换语言",
         needKeyNotice: "请先导入密钥文件，再进入相册。",
         persistenceUnavailable:
           "当前浏览器禁用了本地存储（可能是隐私模式或「阻止所有 Cookie」），登录状态无法保留：刷新页面后需要重新导入密钥。",
@@ -85,6 +92,10 @@ i18n.use(initReactI18next).init({
         aboutDisclaimerBody:
           "非官方的个人项目，与 VRChat Inc. 没有任何关联。相册中的照片版权归拍摄者与原作者所有。",
         aboutEnterAlbum: "进入相册",
+        // 相册页 / 管理页的文案各自拆到独立文件（见 src/locales/*/），
+        // 否则这个文件会膨胀到几百行，三语对照也没法看。
+        album: albumZh,
+        admin: adminZh,
       },
     },
     ja: {
@@ -100,6 +111,7 @@ i18n.use(initReactI18next).init({
         loggedInAs: "現在のユーザー：{{name}}",
         logout: "ログアウト",
         close: "閉じる",
+        languageSwitch: "言語を切り替え",
         needKeyNotice: "先にキーファイルを選んでください。",
         persistenceUnavailable:
           "このブラウザではローカルストレージが無効です（プライベートモードや Cookie のブロックなど）。ログイン状態を保持できないため、再読み込みのたびにキーファイルを選び直す必要があります。",
@@ -127,6 +139,8 @@ i18n.use(initReactI18next).init({
         aboutDisclaimerBody:
           "非公式の個人プロジェクトであり、VRChat Inc. とは一切関係ありません。掲載写真の著作権は撮影者・原作者に帰属します。",
         aboutEnterAlbum: "アルバムへ",
+        album: albumJa,
+        admin: adminJa,
       },
     },
     en: {
@@ -142,6 +156,7 @@ i18n.use(initReactI18next).init({
         loggedInAs: "Signed in as {{name}}",
         logout: "Log out",
         close: "Close",
+        languageSwitch: "Switch language",
         needKeyNotice: "Please import your key file first, then enter the album.",
         persistenceUnavailable:
           "This browser has local storage disabled (private mode or blocked cookies), so your sign-in cannot be kept — you will need to import your key file again after a refresh.",
@@ -169,6 +184,8 @@ i18n.use(initReactI18next).init({
         aboutDisclaimerBody:
           "An unofficial personal project, not affiliated with VRChat Inc. Photos belong to their respective photographers and authors.",
         aboutEnterAlbum: "Enter album",
+        album: albumEn,
+        admin: adminEn,
       },
     },
   },
@@ -177,6 +194,23 @@ i18n.use(initReactI18next).init({
   interpolation: {
     escapeValue: false,
   },
+  /** 关掉 i18next 启动时往控制台打的 Locize 推广横幅（开发模式下默认会打） */
+  showSupportNotice: false,
 });
+
+/**
+ * 切换语言时同步 `<html lang>`。
+ *
+ * 不做这件事的话，切到日文之后文档语言仍然是 index.html 里写死的 `zh`：
+ * 朗读器会用中文音去读日文、浏览器按中文规则挑 CJK 字体、也不会提示"要不要翻译成中文"。
+ * 这类问题不会报错，只会让观感与可访问性悄悄变差。
+ */
+function syncDocumentLang(language: string): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.lang = normalizeToAppLanguage(language);
+}
+
+syncDocumentLang(i18n.language);
+i18n.on("languageChanged", syncDocumentLang);
 
 export default i18n;

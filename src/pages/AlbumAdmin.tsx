@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import JSZip from "jszip";
+import { Trans, useTranslation } from "react-i18next";
+import { LanguageSwitch } from "@/components/LanguageSwitch";
 import { ALBUM_ASSETS_PREFIX, encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
 import { keyFingerprintB64 } from "@/lib/keyFingerprint";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
@@ -133,6 +135,7 @@ async function encryptQueueItem(item: QueueItem, zone: KeyFileZoneV1) {
 }
 
 export default function AlbumAdmin() {
+  const { t } = useTranslation();
   const keySession = useSessionAuthStore((s) => s.keySession);
   const setKeySession = useSessionAuthStore((s) => s.setKeySession);
 
@@ -182,7 +185,7 @@ export default function AlbumAdmin() {
     if (!files.length) return;
     const dz = defaultZoneId || zoneOptions[0]?.zoneId || "";
     if (!dz) {
-      setLastMsg("请先在本页「Zone」标签创建至少一个 Zone，或选择默认 Zone");
+      setLastMsg(t("admin.noZoneYet"));
       setTab("zones");
       return;
     }
@@ -196,17 +199,17 @@ export default function AlbumAdmin() {
       zoneId: dz,
     }));
     setQueue((prev) => [...prev, ...additions]);
-    setLastMsg(`已加入 ${files.length} 个文件（当前共 ${queue.length + additions.length} 项）`);
+    setLastMsg(t("admin.addedFiles", { count: files.length, total: queue.length + additions.length }));
   }
 
   function handleCreateZone() {
     const zoneId = newZoneId.trim();
     if (!/^[a-zA-Z0-9._-]{1,64}$/.test(zoneId)) {
-      setLastMsg("Zone ID 仅允许字母数字与 ._-，长度 1–64");
+      setLastMsg(t("admin.zoneIdRule"));
       return;
     }
     if (zoneOptions.some((z) => z.zoneId === zoneId)) {
-      setLastMsg("该 Zone ID 已存在");
+      setLastMsg(t("admin.zoneIdExists"));
       return;
     }
     const keyB64 = generateZoneKeyB64();
@@ -224,7 +227,7 @@ export default function AlbumAdmin() {
       createdAt: new Date().toISOString(),
     };
     setKeySession({ ...keySession, zones: nextZones });
-    setLastMsg(`已创建 Zone「${zoneId}」，并已下载更新后的密钥文件`);
+    setLastMsg(t("admin.zoneCreated", { zoneId }));
     downloadBlob(
       `key-${keySession.username}-updated.json`,
       new Blob([keyFileToDownloadJson(next)], { type: "application/json" }),
@@ -241,14 +244,14 @@ export default function AlbumAdmin() {
       return;
     }
     setOssUploadConfig(r.config);
-    setLastMsg("OSS 上传配置已校验并保存（仅保存在当前浏览器标签页的会话中）");
+    setLastMsg(t("admin.ossSaved"));
   }
 
   function handleClearOssJson() {
     clearOssConfigSession();
     setOssJsonDraft(getDefaultOssJsonTemplate());
     setOssUploadConfig(null);
-    setLastMsg("已清除 OSS 上传配置");
+    setLastMsg(t("admin.ossCleared"));
   }
 
   /**
@@ -280,7 +283,7 @@ export default function AlbumAdmin() {
 
     const after = await fetchExistingManifestForMerge();
     if (after.status !== "ok") {
-      throw new Error(`相册目录保存后读不回来（${objectKey}），无法确认是否成功，请到 OSS 控制台确认`);
+      throw new Error(t("admin.manifestReadBackFailed", { objectKey }));
     }
     const afterIds = new Set(
       after.payload.assets
@@ -293,7 +296,7 @@ export default function AlbumAdmin() {
     const lost = expectedIds.filter((id) => !afterIds.has(id));
     if (lost.length) {
       throw new Error(
-        `保存后核对不通过：有 ${lost.length} 条没有出现在结果里（如 ${lost.slice(0, 3).join(", ")}），可能被另一次上传覆盖`,
+        t("admin.manifestVerifyLost", { count: lost.length, sample: lost.slice(0, 3).join(", ") }),
       );
     }
     // 顶层字段也必须能回读出来（防止归一化把 assetsBasePath 之类的字段吃掉）
@@ -303,25 +306,23 @@ export default function AlbumAdmin() {
       (k) => !knownTopLevel.has(k) && !(k in afterExtra),
     );
     if (lostTopLevel.length) {
-      throw new Error(
-        `保存后核对不通过：字段 ${lostTopLevel.join(", ")} 没有出现在结果里`,
-      );
+      throw new Error(t("admin.manifestVerifyLostFields", { fields: lostTopLevel.join(", ") }));
     }
     return { previousCount, mergedCount: afterIds.size };
   }
 
   async function runEncrypt(uploadToOss: boolean) {
     if (!queue.length) {
-      setLastMsg("请先添加文件（支持文件夹递归筛选图片/视频后缀）");
+      setLastMsg(t("admin.needFiles"));
       return;
     }
     const missingZone = queue.some((q) => !zoneOptions.some((z) => z.zoneId === q.zoneId));
     if (missingZone) {
-      setLastMsg("存在无效的 Zone，请逐行检查");
+      setLastMsg(t("admin.invalidZoneInQueue"));
       return;
     }
     if (uploadToOss && !ossUploadConfig) {
-      setLastMsg("请先填写并保存「OSS 上传配置」JSON（加密并上传到 OSS 必填）");
+      setLastMsg(t("admin.needOssConfig"));
       return;
     }
 
@@ -334,13 +335,13 @@ export default function AlbumAdmin() {
         // 先探一次上传通道：预检被拒时浏览器只报"网络错误"，无法区分
         // CORS 未放行 / 账号数据访问被停用 / 网络不可达。先探明再批量上传，
         // 避免选了上百张图却只得到上百条一模一样的报错。
-        setLastMsg("检查上传通道…");
+        setLastMsg(t("admin.checkingUploadPath"));
         const probe = await probeUploadAccess(ossCfg);
         if (!probe.ok) {
-          setLastMsg(probe.message);
+          setLastMsg(t("admin.uploadPathUnavailable", { detail: probe.message }));
           return;
         }
-        setLastMsg("检查并初始化相册存储…");
+        setLastMsg(t("admin.checkingAlbumStorage"));
         await ensureAlbumStorageInitialized(ossCfg);
         const newManifestAssets: Record<string, unknown>[] = [];
         const failedItems: QueueItem[] = [];
@@ -351,10 +352,10 @@ export default function AlbumAdmin() {
 
         for (let i = 0; i < queue.length; i++) {
           const item = queue[i];
-          setLastMsg(`加密并上传 ${i + 1}/${queue.length}…`);
+          setLastMsg(t("admin.encryptingProgress", { current: i + 1, total: queue.length }));
           try {
             const zone = zoneOptions.find((z) => z.zoneId === item.zoneId);
-            if (!zone) throw new Error(`Zone「${item.zoneId}」不存在`);
+            if (!zone) throw new Error(t("admin.zoneMissing", { zoneId: item.zoneId }));
             const { row, cipherBytes, ossKey } = await encryptQueueItem(item, zone);
             const putUrl = await resolvePutSignedUrl(ossKey, ossCfg, "application/octet-stream");
             await putObjectWithSignedUrl(putUrl, cipherBytes, "application/octet-stream");
@@ -377,9 +378,11 @@ export default function AlbumAdmin() {
         if (abortedEarly) {
           setQueue(failedItems);
           setLastMsg(
-            `连续 ${consecutiveFailures} 项失败，已停止本次上传（剩余 ${failedItems.length} 项保留在列表中）。` +
-              `首个失败原因：${failures[0]}。这通常不是单个文件的问题，而是上传通道整体不可用——` +
-              `请运行 node tools/oss-upload-cors.mjs 查看预检状态，并确认阿里云账号/桶未因欠费等原因停用数据访问。`,
+            t("admin.abortedConsecutive", {
+              count: consecutiveFailures,
+              remaining: failedItems.length,
+              reason: failures[0],
+            }),
           );
           return;
         }
@@ -387,7 +390,7 @@ export default function AlbumAdmin() {
         if (!newManifestAssets.length) {
           setQueue(failedItems);
           setLastMsg(
-            `${failures.length} 项都没能上传，相册没有任何改动。第一个失败原因：${failures[0]}`,
+            t("admin.allUploadsFailed", { count: failures.length, reason: failures[0] }),
           );
           return;
         }
@@ -395,10 +398,15 @@ export default function AlbumAdmin() {
         try {
           const result = await mergeAndUploadManifest(newManifestAssets, ossCfg);
           const warn = failures.length
-            ? `；另有 ${failures.length} 项失败，已保留在列表中可重试（首个：${failures[0]}）`
+            ? t("admin.someFailedSuffix", { count: failures.length, reason: failures[0] })
             : "";
           setLastMsg(
-            `已保存：原有 ${result.previousCount} 张 + 本次 ${newManifestAssets.length} 张 = 共 ${result.mergedCount} 张。${warn}`,
+            t("admin.savedSummary", {
+              previous: result.previousCount,
+              added: newManifestAssets.length,
+              total: result.mergedCount,
+              detail: warn,
+            }),
           );
           setQueue(failedItems);
         } catch (e) {
@@ -411,8 +419,10 @@ export default function AlbumAdmin() {
           );
           setQueue(failedItems);
           setLastMsg(
-            `${newManifestAssets.length} 张照片已上传，但相册目录保存失败：${e instanceof Error ? e.message : String(e)}。` +
-              `已下载 manifest-backup-*.json 作为备份；请先确认相册状态再重试，不要反复上传。`,
+            t("admin.uploadedButManifestFailed", {
+              count: newManifestAssets.length,
+              detail: e instanceof Error ? e.message : String(e),
+            }),
           );
         }
         return;
@@ -423,7 +433,9 @@ export default function AlbumAdmin() {
 
       for (let b = 0; b < batches.length; b++) {
         const batch = batches[b];
-        setLastMsg(`打包 ZIP 分卷 ${b + 1}/${batches.length}（本卷 ${batch.length} 个文件）…`);
+        setLastMsg(
+          t("admin.zipProgress", { current: b + 1, total: batches.length, files: batch.length }),
+        );
 
         const zip = new JSZip();
         const assetsFolder = zip.folder("assets");
@@ -465,12 +477,18 @@ export default function AlbumAdmin() {
 
       setLastMsg(
         batches.length > 1
-          ? `已生成 ${batches.length} 个 ZIP 分卷（每卷至多约 ${ZIP_BATCH_MAX_FILES} 个文件或 ${Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024))}MB 原图体积），避免一次性分配过大内存。`
-          : `已生成 ZIP（${queue.length} 个文件）。`,
+          ? t("admin.zipSplitDone", {
+              parts: batches.length,
+              maxFiles: ZIP_BATCH_MAX_FILES,
+              maxMb: Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024)),
+            })
+          : t("admin.zipSingleDone", { count: queue.length }),
       );
       setQueue([]);
     } catch (e) {
-      setLastMsg(e instanceof Error ? e.message : String(e));
+      setLastMsg(
+        t("admin.couldNotFinish", { detail: e instanceof Error ? e.message : String(e) }),
+      );
     } finally {
       setBusy(false);
     }
@@ -484,19 +502,22 @@ export default function AlbumAdmin() {
             to="/album"
             className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/90 hover:bg-white/10"
           >
-            返回相册
+            {t("admin.backToAlbum")}
           </Link>
           <div>
-            <div className="text-sm font-extrabold tracking-wide">相册管理</div>
+            <div className="text-sm font-extrabold tracking-wide">{t("admin.adminTitle")}</div>
             <div className="text-[11px] text-amber-200/90">{keySession.username}</div>
           </div>
         </div>
-        <Link
-          to="/"
-          className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-white/70 hover:text-white"
-        >
-          首页
-        </Link>
+        <div className="flex shrink-0 items-center gap-2">
+          <LanguageSwitch className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold tracking-wide text-white/75 hover:bg-white/10" />
+          <Link
+            to="/"
+            className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-white/70 hover:text-white"
+          >
+            {t("admin.home")}
+          </Link>
+        </div>
       </header>
 
       <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-4 overflow-auto px-4 py-4">
@@ -508,7 +529,7 @@ export default function AlbumAdmin() {
             }`}
             onClick={() => setTab("encrypt")}
           >
-            加密照片到 Zone
+            {t("admin.tabEncrypt")}
           </button>
           <button
             type="button"
@@ -517,7 +538,7 @@ export default function AlbumAdmin() {
             }`}
             onClick={() => setTab("zones")}
           >
-            创建与管理 Zone
+            {t("admin.tabZones")}
           </button>
         </div>
 
@@ -525,10 +546,13 @@ export default function AlbumAdmin() {
           <section className="space-y-4 rounded-2xl border border-amber-400/30 bg-amber-950/20 p-4">
             <div className="rounded-xl border border-cyan-400/35 bg-black/35 p-3">
               <div className="mb-2 text-[11px] font-extrabold text-cyan-100/95">
-                OSS 上传配置（点「加密并上传到 OSS」前<strong className="text-cyan-50">必填</strong>）
+                <Trans
+                  i18nKey="admin.ossConfigTitle"
+                  components={{ strong: <strong className="text-cyan-50" /> }}
+                />
               </div>
               <textarea
-                aria-label="OSS 上传配置 JSON"
+                aria-label={t("admin.ossConfigJsonAria")}
                 className="h-40 w-full resize-y rounded-lg border border-white/15 bg-black/50 p-2 font-mono text-[11px] leading-relaxed text-white/90 outline-none focus:border-cyan-400/50"
                 spellCheck={false}
                 autoComplete="off"
@@ -537,11 +561,11 @@ export default function AlbumAdmin() {
               />
               <div className="mt-2 flex flex-wrap gap-2">
                 <label className="cursor-pointer rounded-lg border border-cyan-400/40 px-3 py-1.5 text-[11px] text-cyan-50">
-                  导入 OSS JSON
+                  {t("admin.importOssJson")}
                   <input
                     type="file"
                     accept=".json,application/json"
-                    aria-label="导入 OSS JSON"
+                    aria-label={t("admin.importOssJson")}
                     className="sr-only"
                     disabled={busy}
                     onChange={async (e) => {
@@ -552,14 +576,14 @@ export default function AlbumAdmin() {
                         const text = await file.text();
                         const result = saveOssConfigToSession(text);
                         if (result.ok === false) {
-                          setLastMsg(`OSS 配置导入失败：${result.error}`);
+                          setLastMsg(t("admin.ossImportFailed", { detail: result.error }));
                           return;
                         }
                         setOssJsonDraft(text);
                         setOssUploadConfig(result.config);
-                        setLastMsg("OSS 上传配置已导入并保存（仅当前标签页会话）");
+                        setLastMsg(t("admin.ossImported"));
                       } catch {
-                        setLastMsg("OSS 配置文件读取或保存失败，请重试");
+                        setLastMsg(t("admin.ossImportReadFailed"));
                       }
                     }}
                   />
@@ -569,45 +593,52 @@ export default function AlbumAdmin() {
                   className="rounded-lg border border-cyan-400/40 bg-cyan-500/20 px-3 py-1.5 text-[11px] font-extrabold text-cyan-50 hover:bg-cyan-500/30"
                   onClick={handleSaveOssJson}
                 >
-                  保存配置
+                  {t("admin.saveConfig")}
                 </button>
                 <button
                   type="button"
                   className="rounded-lg border border-white/15 px-3 py-1.5 text-[11px] text-white/75 hover:bg-white/10"
                   onClick={handleClearOssJson}
                 >
-                  清除配置
+                  {t("admin.clearConfig")}
                 </button>
               </div>
               <p className="mt-2 text-[10px] leading-relaxed text-rose-200/85">
-                这段密钥只保存在当前标签页，关掉浏览器就清空。请务必：不要在公共电脑上使用、不要提交到 Git、不要发到聊天里；一旦泄露，请到阿里云控制台更换。
+                {t("admin.ossSecretWarning")}
               </p>
               {ossUploadConfig ? (
                 <p className="mt-1 text-[10px] text-emerald-200/90">
-                  已就绪：Bucket「{ossUploadConfig.oss_bucket_name}」· {ossUploadConfig.oss_endpoint}
+                  {t("admin.ossReady", {
+                    bucket: ossUploadConfig.oss_bucket_name,
+                    endpoint: ossUploadConfig.oss_endpoint,
+                  })}
                 </p>
               ) : (
-                <p className="mt-1 text-[10px] text-amber-200/85">尚未保存有效配置</p>
+                <p className="mt-1 text-[10px] text-amber-200/85">{t("admin.ossNotConfigured")}</p>
               )}
             </div>
 
             <p className="text-[11px] leading-relaxed text-white/55">
-              只挑图片和视频（jpg / png / webp / gif / mp4 / webm）。选文件夹时会连着子文件夹一起找。每个文件都能单独选放进哪个
-              Zone。<span className="text-amber-200/90">照片多的时候请用「加密并上传到 OSS」</span>
-              （直接传，不占内存）；「仅打包下载」会按约 {ZIP_BATCH_MAX_FILES} 张 或{" "}
-              {Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024))}MB 分成几个 ZIP 下载。上传前需要先在上面填好 OSS 配置。
+              <Trans
+                i18nKey="admin.encryptHint"
+                values={{
+                  maxFiles: ZIP_BATCH_MAX_FILES,
+                  maxMb: Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024)),
+                }}
+                components={{ span: <span className="text-amber-200/90" /> }}
+              />
             </p>
 
             <div className="flex flex-wrap gap-3">
               <label className="text-[11px] text-white/60">
-                默认 Zone（新加入文件）
+                {t("admin.defaultZoneLabel")}
                 <select
                   className="mt-1 block rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs text-white"
                   value={defaultZoneId}
                   onChange={(e) => setDefaultZoneId(e.target.value)}
                 >
                   {zoneOptions.length === 0 ? (
-                    <option value="">请先创建 Zone</option>
+                    <option value="">{t("admin.createZoneFirst")}</option>
                   ) : (
                     zoneOptions.map((z) => (
                       <option key={z.zoneId} value={z.zoneId}>
@@ -622,7 +653,7 @@ export default function AlbumAdmin() {
 
             <div className="flex flex-wrap gap-3">
               <label className="cursor-pointer rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-xs font-extrabold hover:bg-white/15">
-                选择文件
+                {t("admin.selectFiles")}
                 <input
                   type="file"
                   multiple
@@ -634,7 +665,7 @@ export default function AlbumAdmin() {
                 />
               </label>
               <label className="cursor-pointer rounded-xl border border-amber-400/40 bg-amber-500/15 px-4 py-2 text-xs font-extrabold text-amber-100 hover:bg-amber-500/25">
-                选择文件夹（递归）
+                {t("admin.selectFolderRecursive")}
                 <input
                   type="file"
                   multiple
@@ -651,10 +682,10 @@ export default function AlbumAdmin() {
                 className="rounded-xl border border-white/15 px-4 py-2 text-xs text-white/70 hover:bg-white/10"
                 onClick={() => {
                   setQueue([]);
-                  setLastMsg("已清空列表");
+                  setLastMsg(t("admin.queueCleared"));
                 }}
               >
-                清空列表
+                {t("admin.clearQueue")}
               </button>
             </div>
 
@@ -663,8 +694,8 @@ export default function AlbumAdmin() {
                 <table className="w-full text-left text-[11px]">
                   <thead className="sticky top-0 bg-zinc-900/95 text-white/55">
                     <tr>
-                      <th className="px-2 py-2">路径</th>
-                      <th className="w-40 px-2 py-2">目标 Zone</th>
+                      <th className="px-2 py-2">{t("admin.colPath")}</th>
+                      <th className="w-40 px-2 py-2">{t("admin.colTargetZone")}</th>
                       <th className="w-16 px-2 py-2" />
                     </tr>
                   </thead>
@@ -699,7 +730,7 @@ export default function AlbumAdmin() {
                             className="text-rose-300/90 hover:text-rose-200"
                             onClick={() => setQueue((prev) => prev.filter((q) => q.key !== item.key))}
                           >
-                            移除
+                            {t("admin.remove")}
                           </button>
                         </td>
                       </tr>
@@ -716,7 +747,7 @@ export default function AlbumAdmin() {
                 className="rounded-xl border border-amber-400/50 bg-amber-500/25 px-5 py-2.5 text-xs font-extrabold text-amber-50 hover:bg-amber-500/35 disabled:opacity-40"
                 onClick={() => void runEncrypt(true)}
               >
-                {busy ? "处理中…" : "加密并上传到 OSS"}
+                {busy ? t("admin.processing") : t("admin.encryptAndUpload")}
               </button>
               <button
                 type="button"
@@ -724,24 +755,24 @@ export default function AlbumAdmin() {
                 className="rounded-xl border border-white/20 bg-white/10 px-5 py-2.5 text-xs font-extrabold text-white/90 hover:bg-white/15 disabled:opacity-40"
                 onClick={() => void runEncrypt(false)}
               >
-                仅打包下载 ZIP（离线）
+                {t("admin.zipOnlyOffline")}
               </button>
             </div>
           </section>
         ) : (
           <section className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="text-[11px] font-bold text-white/70">新建 Zone</div>
+            <div className="text-[11px] font-bold text-white/70">{t("admin.newZoneTitle")}</div>
             <label className="block text-[11px] text-white/55">
               Zone ID
               <input
                 className="mt-1 w-full max-w-md rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs text-white"
                 value={newZoneId}
                 onChange={(e) => setNewZoneId(e.target.value)}
-                placeholder="例：friends-2026"
+                placeholder={t("admin.zoneIdPlaceholder")}
               />
             </label>
             <label className="block text-[11px] text-white/55">
-              备注（可选）
+              {t("admin.zoneCommentLabel")}
               <input
                 className="mt-1 w-full max-w-md rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs text-white"
                 value={newZoneComment}
@@ -753,10 +784,10 @@ export default function AlbumAdmin() {
               className="rounded-xl border border-amber-400/40 bg-amber-500/20 px-4 py-2 text-xs font-extrabold text-amber-100 hover:bg-amber-500/30"
               onClick={handleCreateZone}
             >
-              生成密钥并下载更新后的密钥文件
+              {t("admin.generateKeyAndDownload")}
             </button>
 
-            <div className="mt-4 text-[11px] font-bold text-white/70">已有 Zone</div>
+            <div className="mt-4 text-[11px] font-bold text-white/70">{t("admin.existingZones")}</div>
             <ul className="list-inside list-disc text-[11px] text-white/60">
               {zoneOptions.map((z) => (
                 <li key={z.zoneId}>
@@ -772,7 +803,7 @@ export default function AlbumAdmin() {
           <div className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[11px] text-amber-100/95">{lastMsg}</div>
         ) : null}
 
-        <p className="text-[10px] text-white/40">保存前会先读取现有相册并核对，确保不会覆盖已有照片。</p>
+        <p className="text-[10px] text-white/40">{t("admin.mergeSafetyNote")}</p>
       </div>
     </div>
   );

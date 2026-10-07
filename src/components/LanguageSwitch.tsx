@@ -9,13 +9,13 @@ import { getLanguageLabel, getNextLanguage, persistLanguage } from "@/i18n";
  * 切换顺序与语言名的写法都放在 i18n.ts，避免两个页面各写一份而走样。
  */
 export function LanguageSwitch({ className }: { className?: string }) {
-  const { i18n: i18nInstance } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
 
   return (
     <button
       type="button"
       className={className}
-      aria-label="Language"
+      aria-label={t("languageSwitch")}
       onClick={() => {
         const next = getNextLanguage(i18nInstance.language);
         void i18nInstance.changeLanguage(next);

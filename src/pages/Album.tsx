@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
+import { LanguageSwitch } from "@/components/LanguageSwitch";
+// 组件外的那几个辅助函数拿不到 useTranslation 的 t，直接向 i18n 实例取同一份文案。
+import i18n from "@/i18n";
 import { checkAssetAccess, filterAccessibleAssets } from "@/lib/albumAccess";
 import {
   blobCacheObjectKey,
@@ -101,8 +105,9 @@ function toTs(iso?: string) {
   return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
 }
 
-function formatTs(ts: number) {
-  if (!Number.isFinite(ts) || ts <= 0) return "时间未知";
+/** 时间戳格式化；时间未知时的文案由调用方传入（这里拿不到 t） */
+function formatTs(ts: number, unknownLabel: string) {
+  if (!Number.isFinite(ts) || ts <= 0) return unknownLabel;
   const d = new Date(ts);
   const yyyy = String(d.getFullYear());
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -250,7 +255,7 @@ async function fetchAsBlobUrl(asset: AlbumAsset, signedUrl: string, mimeFallback
     cache: "no-store",
     referrerPolicy: "strict-origin-when-cross-origin",
   });
-  if (!res.ok) throw new Error(`图片请求失败：HTTP ${res.status}`);
+  if (!res.ok) throw new Error(i18n.t("album.errImageRequest", { status: res.status }));
   const mime = res.headers.get("content-type") || mimeFallback || "application/octet-stream";
   const bytes = new Uint8Array(await res.arrayBuffer());
   const meta = await resolveMetadataFromPlainBytes(asset, bytes);
@@ -273,7 +278,7 @@ async function fetchCipherBlobUrl(
     cache: "no-store",
     referrerPolicy: "strict-origin-when-cross-origin",
   });
-  if (!res.ok) throw new Error(`密文请求失败：HTTP ${res.status}`);
+  if (!res.ok) throw new Error(i18n.t("album.errCipherRequest", { status: res.status }));
 
   const cipherBytes = new Uint8Array(await res.arrayBuffer());
   const iv = base64ToBytes(nonceB64);
@@ -343,16 +348,18 @@ function useAssetImageUrl(
     const run = async () => {
       if (file) {
         const signed = await fetchSignedUrlForOssObject(file);
-        if (!signed) throw new Error("获取签名URL失败");
+        if (!signed) throw new Error(i18n.t("album.errSignUrl"));
         return fetchAsBlobUrl(asset, signed, asset.mime);
       }
 
-      if (!cipherFile) throw new Error("缺少可读取的对象键");
-      if (!access.zoneKeyB64) throw new Error(`缺少 Zone「${asset.zoneId ?? "?"}」的解密密钥`);
-      if (!asset.nonceB64?.trim()) throw new Error("密文资源缺少 nonceB64");
+      if (!cipherFile) throw new Error(i18n.t("album.errNoObjectKey"));
+      if (!access.zoneKeyB64) {
+        throw new Error(i18n.t("album.errNoZoneKey", { zone: asset.zoneId ?? "?" }));
+      }
+      if (!asset.nonceB64?.trim()) throw new Error(i18n.t("album.errNoNonce"));
 
       const signed = await fetchSignedUrlForOssObject(cipherFile);
-      if (!signed) throw new Error("获取密文临时URL失败");
+      if (!signed) throw new Error(i18n.t("album.errCipherUrl"));
 
       const aadJson =
         asset.aad && typeof asset.aad === "object"
@@ -409,6 +416,7 @@ function useAssetImageUrl(
 }
 
 export default function Album() {
+  const { t } = useTranslation();
   const keySession = useSessionAuthStore((s) => s.keySession);
   const [mode, setMode] = useState<AlbumViewMode>("time");
   const [manifest, setManifest] = useState<AlbumManifest | null>(null);
@@ -589,7 +597,7 @@ export default function Album() {
     for (const a of timeSorted) {
       const worldId = a.world?.worldId || "unknown";
       const worldName =
-        a.world?.worldName || (worldId === "unknown" ? "未知世界 / 待填写" : worldId);
+        a.world?.worldName || (worldId === "unknown" ? t("album.worldUnknownPending") : worldId);
 
       const g =
         map.get(worldId) ?? ({
@@ -608,7 +616,7 @@ export default function Album() {
     }
 
     return [...map.values()].sort((a, b) => b.latestTs - a.latestTs);
-  }, [timeSorted]);
+  }, [timeSorted, t]);
 
   // 时间模式：触底加载更多（不改变现有网格样式，只减少一次性渲染数量）
   useEffect(() => {
@@ -750,7 +758,7 @@ export default function Album() {
     if (!deleteTarget) return;
     const cfg = loadOssConfigFromSession();
     if (!cfg) {
-      setDeleteError("需要先在「相册管理」页保存 OSS 上传配置，删除请求才能签名。");
+      setDeleteError(t("album.errDeleteNeedsOssConfig"));
       return;
     }
 
@@ -773,7 +781,9 @@ export default function Album() {
       setDeleteTarget(null);
       setActiveIndex(null);
       await refetchManifest();
-      setToast(report.objectAlreadyGone ? "这张照片已删除（密文此前已不存在）" : "已删除这张照片");
+      setToast(
+        report.objectAlreadyGone ? t("album.deletedGone") : t("album.deleted"),
+      );
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -792,12 +802,12 @@ export default function Album() {
     if (!zoneTarget) return;
     const cfg = loadOssConfigFromSession();
     if (!cfg) {
-      setZoneError("需要先在「相册管理」页保存 OSS 上传配置，迁移请求才能签名。");
+      setZoneError(t("album.errZoneNeedsOssConfig"));
       return;
     }
     const target = zoneTargetId.trim();
     if (!target) {
-      setZoneError("请选择要换成哪个 Zone");
+      setZoneError(t("album.zoneSelectRequired"));
       return;
     }
 
@@ -825,8 +835,8 @@ export default function Album() {
       setZoneTarget(null);
       setToast(
         report.fromPlaintext
-          ? `已加密并归入 Zone「${report.toZoneId}」`
-          : `已改成 Zone「${report.toZoneId}」`,
+          ? t("album.zoneMovedEncrypted", { zone: report.toZoneId })
+          : t("album.zoneMoved", { zone: report.toZoneId }),
       );
     } catch (e) {
       setZoneError(e instanceof Error ? e.message : String(e));
@@ -855,7 +865,7 @@ export default function Album() {
   /** 下载当前大图：直接复用已解密并展示中的 Blob URL，不重新下载 */
   function downloadActiveImage() {
     if (!active || !activeBlobUrl || !canDownloadActive) {
-      setToast("图片还没准备好，请稍后再试");
+      setToast(t("album.imageNotReady"));
       return;
     }
     const a = document.createElement("a");
@@ -864,13 +874,13 @@ export default function Album() {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setToast("已开始下载");
+    setToast(t("album.downloadStarted"));
   }
 
   async function copyText(text: string, label: string) {
     try {
       await navigator.clipboard.writeText(text);
-      setToast(`${label}已复制`);
+      setToast(t("album.copied", { label }));
     } catch {
       // 兼容极少数环境
       try {
@@ -884,9 +894,9 @@ export default function Album() {
         ta.select();
         document.execCommand("copy");
         document.body.removeChild(ta);
-        setToast(`${label}已复制`);
+        setToast(t("album.copied", { label }));
       } catch {
-        setToast("复制失败");
+        setToast(t("album.copyFailed"));
       }
     }
   }
@@ -908,10 +918,12 @@ export default function Album() {
             to="/"
             className="shrink-0 rounded-xl border border-white/20 bg-black/20 px-3 py-2 text-sm font-extrabold text-white/90 backdrop-blur hover:bg-black/30"
           >
-            返回
+            {t("album.back")}
           </Link>
           <div className="min-w-0">
-            <div className="text-sm font-extrabold tracking-wide text-white/90">相册</div>
+            <div className="text-sm font-extrabold tracking-wide text-white/90">
+              {t("album.title")}
+            </div>
             <div className="truncate text-[11px] font-bold text-white/55">{keySession.username}</div>
           </div>
           {keySession?.isAdmin ? (
@@ -919,38 +931,44 @@ export default function Album() {
               to="/album-admin"
               className="ml-1 shrink-0 rounded-xl border border-amber-400/35 bg-amber-500/15 px-3 py-1.5 text-[11px] font-extrabold text-amber-100/95 hover:bg-amber-500/25"
             >
-              管理
+              {t("album.adminLink")}
             </Link>
           ) : null}
           <Link
             to="/about"
             className="shrink-0 rounded-xl border border-white/15 bg-black/15 px-3 py-1.5 text-[11px] font-extrabold text-white/70 backdrop-blur hover:bg-black/30"
           >
-            关于
+            {t("album.aboutLink")}
           </Link>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-white/15 bg-black/15 p-1 backdrop-blur">
-          <button
-            type="button"
-            onClick={() => setMode("time")}
-            className={cn(
-              "rounded-2xl px-3 py-2 text-xs font-extrabold tracking-wide text-white/80",
-              mode === "time" && "bg-white/15 text-white",
-            )}
-          >
-            按时间
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("world")}
-            className={cn(
-              "rounded-2xl px-3 py-2 text-xs font-extrabold tracking-wide text-white/80",
-              mode === "world" && "bg-white/15 text-white",
-            )}
-          >
-            按世界
-          </button>
+        {/* 右侧一组：视图切换 + 语言切换。外面这层不是多余的——header 是 justify-between，
+            把语言切换器直接当第三个子元素会让「按时间 / 按世界」飘到页头正中间。 */}
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-white/15 bg-black/15 p-1 backdrop-blur">
+            <button
+              type="button"
+              onClick={() => setMode("time")}
+              className={cn(
+                "rounded-2xl px-3 py-2 text-xs font-extrabold tracking-wide text-white/80",
+                mode === "time" && "bg-white/15 text-white",
+              )}
+            >
+              {t("album.byTime")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("world")}
+              className={cn(
+                "rounded-2xl px-3 py-2 text-xs font-extrabold tracking-wide text-white/80",
+                mode === "world" && "bg-white/15 text-white",
+              )}
+            >
+              {t("album.byWorld")}
+            </button>
+          </div>
+
+          <LanguageSwitch className="shrink-0 rounded-xl border border-white/20 bg-black/20 px-3 py-2 text-xs font-extrabold text-white/80 backdrop-blur hover:bg-black/30" />
         </div>
       </header>
 
@@ -961,13 +979,15 @@ export default function Album() {
       */}
       {zoneFilters.length > 1 ? (
         <div className="relative z-10 flex flex-wrap items-center gap-2 px-4 pb-2">
-          <span className="text-[11px] font-bold tracking-wide text-white/45">显示 Zone</span>
+          <span className="text-[11px] font-bold tracking-wide text-white/45">
+            {t("album.showZone")}
+          </span>
           {zoneFilters.map((z) => (
             <label
               key={z.zoneId}
               title={[
                 z.comment ? `${z.zoneId} — ${z.comment}` : z.zoneId,
-                z.count === 0 ? "这个 Zone 还没有照片" : `共 ${z.count} 张`,
+                z.count === 0 ? t("album.zoneEmpty") : t("album.photosCount", { count: z.count }),
               ].join(" · ")}
               className={cn(
                 "inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] font-extrabold backdrop-blur transition-colors",
@@ -994,7 +1014,7 @@ export default function Album() {
               className="rounded-xl border border-amber-400/40 bg-amber-500/15 px-2.5 py-1.5 text-[11px] font-extrabold text-amber-100 hover:bg-amber-500/25"
               onClick={showAllZones}
             >
-              已隐藏 {hiddenByZoneCount} 张 · 全部显示
+              {t("album.showAllHidden", { count: hiddenByZoneCount })}
             </button>
           ) : null}
         </div>
@@ -1003,32 +1023,43 @@ export default function Album() {
       <main ref={scrollRef} className="relative z-10 flex-1 overflow-auto px-4 pb-6">
         <div className="mx-auto w-full max-w-6xl">
           {error ? (
-            <div
-              className="mt-4 rounded-2xl border border-red-400/30 bg-red-950/30 p-4 text-sm text-red-100"
-              title={error}
-            >
-              相册暂时打不开，请稍后再试。
-              <div className="mt-1 text-xs text-red-200/70">如果一直这样，请联系站长。</div>
+            <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-950/30 p-4 text-sm text-red-100">
+              <div>{t("album.loadFailedTitle")}</div>
+              <div className="mt-1 text-xs text-red-200/70">{t("album.loadFailedHint")}</div>
+              <details className="mt-2 text-[11px] text-red-200/60">
+                <summary className="cursor-pointer">{t("album.technicalDetail")}</summary>
+                <pre className="mt-1 whitespace-pre-wrap break-all font-mono">{error}</pre>
+              </details>
             </div>
           ) : null}
 
           {!manifest && !error ? (
-            <div className="mt-10 text-center text-sm font-bold text-white/70">正在加载相册…</div>
+            <div className="mt-10 text-center text-sm font-bold text-white/70">
+              {t("album.loading")}
+            </div>
           ) : null}
 
           {manifest ? (
             <>
               <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-white/70">
                 <div>
-                  共 <span className="font-extrabold text-white/90">{timeSorted.length}</span> 张
+                  {/*
+                    用 <Trans> 而不是 t()：数字上原有的加粗高亮要保住。
+                    带标记的整句没法用 t() 表达（那会变成三个碎片 key，英文语序排不顺）。
+                  */}
+                  <Trans
+                    i18nKey="album.totalCount"
+                    count={timeSorted.length}
+                    components={{ strong: <span className="font-extrabold text-white/90" /> }}
+                  />
                   {hiddenByZoneCount > 0 ? (
                     <span className="ml-2 text-white/45">
-                      （另有 {hiddenByZoneCount} 张被上方的 Zone 开关隐藏）
+                      {t("album.hiddenByZoneNote", { count: hiddenByZoneCount })}
                     </span>
                   ) : null}
                   {hiddenCount > 0 ? (
                     <span className="ml-2 text-white/45">
-                      （另有 {hiddenCount} 张不在当前身份的权限内）
+                      {t("album.hiddenByPermissionNote", { count: hiddenCount })}
                     </span>
                   ) : null}
                 </div>
@@ -1037,10 +1068,10 @@ export default function Album() {
               {timeSorted.length === 0 ? (
                 <div className="mt-10 text-center text-sm font-bold text-white/70">
                   {hiddenByZoneCount > 0
-                    ? "这些照片都被上方的 Zone 开关隐藏了，点「全部显示」就能看到。"
+                    ? t("album.emptyAllHidden")
                     : hiddenCount > 0
-                      ? "这里的照片不在当前身份的权限内。"
-                      : "相册暂无照片，管理员上传后会自动显示。"}
+                      ? t("album.emptyNoPermission")
+                      : t("album.emptyNoPhotos")}
                 </div>
               ) : null}
 
@@ -1052,20 +1083,20 @@ export default function Album() {
                       type="button"
                       onClick={() => setActiveIndex(indexById.get(a.assetId) ?? 0)}
                       className="group overflow-hidden rounded-2xl border border-white/10 bg-white/5 shadow-[0_18px_60px_rgba(0,0,0,0.35)]"
-                      title={a.world?.worldName ?? a.world?.worldId ?? "世界未知"}
+                      title={a.world?.worldName ?? a.world?.worldId ?? t("album.worldUnknown")}
                     >
                       <div className="relative aspect-[4/3] w-full bg-black/20">
                         <TimeCardImage asset={a} onResolvedMetadata={handleResolvedMetadata} />
                       </div>
                       <div className="flex flex-col gap-0.5 px-3 py-2 text-left">
                         <div className="truncate text-[11px] font-extrabold text-white/85">
-                          {formatTs(a._takenAtTs)}
+                          {formatTs(a._takenAtTs, t("album.timeUnknown"))}
                         </div>
                         <span
                           role="button"
                           tabIndex={0}
                           className="truncate text-left text-[11px] text-white/60 hover:text-white/85"
-                          title="点击复制世界名称/ID"
+                          title={t("album.copyWorldTitle")}
                           onClick={(e) => {
                             // 外层卡片是 button，这里不能再嵌套 button
                             e.preventDefault();
@@ -1073,14 +1104,14 @@ export default function Album() {
                             const name = a.world?.worldName?.trim();
                             const id = a.world?.worldId?.trim();
                             if (name) {
-                              void copyText(name, "世界名称");
+                              void copyText(name, t("album.worldNameLabel"));
                               return;
                             }
                             if (id) {
                               void copyText(id, "WorldID");
                               return;
                             }
-                            setToast("无世界信息可复制");
+                            setToast(t("album.noWorldInfo"));
                           }}
                           onKeyDown={(e) => {
                             if (e.key !== "Enter" && e.key !== " ") return;
@@ -1089,17 +1120,18 @@ export default function Album() {
                             const name = a.world?.worldName?.trim();
                             const id = a.world?.worldId?.trim();
                             if (name) {
-                              void copyText(name, "世界名称");
+                              void copyText(name, t("album.worldNameLabel"));
                               return;
                             }
                             if (id) {
                               void copyText(id, "WorldID");
                               return;
                             }
-                            setToast("无世界信息可复制");
+                            setToast(t("album.noWorldInfo"));
                           }}
                         >
-                          {a.world?.worldName ?? (a.world?.worldId ? a.world.worldId : "世界未知")}
+                          {a.world?.worldName ??
+                            (a.world?.worldId ? a.world.worldId : t("album.worldUnknown"))}
                         </span>
                       </div>
                     </button>
@@ -1119,11 +1151,11 @@ export default function Album() {
                             <button
                               type="button"
                               className="block w-full truncate text-left text-sm font-extrabold text-white/90 hover:text-white"
-                              title="点击复制世界名称"
+                              title={t("album.copyWorldNameTitle")}
                               onClick={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
-                                if (g.worldName) void copyText(g.worldName, "世界名称");
+                                if (g.worldName) void copyText(g.worldName, t("album.worldNameLabel"));
                               }}
                             >
                               {g.worldName}
@@ -1131,7 +1163,7 @@ export default function Album() {
                             <button
                               type="button"
                               className="block w-full truncate text-left text-[11px] text-white/60 hover:text-white/85"
-                              title="点击复制 WorldID"
+                              title={t("album.copyWorldIdTitle")}
                               onClick={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -1139,18 +1171,18 @@ export default function Album() {
                                   void copyText(g.worldId, "WorldID");
                                   return;
                                 }
-                                setToast("WorldID 为空（待填写）");
+                                setToast(t("album.worldIdEmpty"));
                               }}
                             >
-                              {g.worldId === "unknown" ? "WorldID 为空（待填写）" : g.worldId}
+                              {g.worldId === "unknown" ? t("album.worldIdEmpty") : g.worldId}
                             </button>
                           </div>
                           <div className="flex items-center gap-3 text-[11px] text-white/70">
-                            <div>
-                              {g.items.length} 张
-                            </div>
+                            <div>{t("album.photosCount", { count: g.items.length })}</div>
                             <div className="hidden sm:block">
-                              最新：{formatTs(g.latestTs)}
+                              {t("album.latestAt", {
+                                time: formatTs(g.latestTs, t("album.timeUnknown")),
+                              })}
                             </div>
                           </div>
                         </div>
@@ -1169,7 +1201,7 @@ export default function Album() {
                                 <TimeCardImage asset={a} onResolvedMetadata={handleResolvedMetadata} />
                               </div>
                               <div className="px-3 py-2 text-left text-[11px] font-extrabold text-white/80">
-                                {formatTs(a._takenAtTs)}
+                                {formatTs(a._takenAtTs, t("album.timeUnknown"))}
                               </div>
                             </button>
                           );
@@ -1202,28 +1234,28 @@ export default function Album() {
             <div className="flex items-center justify-between gap-2 pb-2">
               <div className="min-w-0">
                 <div className="truncate text-sm font-extrabold text-white/90">
-                  {formatTs(active._takenAtTs)}
+                  {formatTs(active._takenAtTs, t("album.timeUnknown"))}
                 </div>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <button
                     type="button"
                     className="truncate text-left text-xs text-white/60 hover:text-white/85"
-                    title="点击复制世界名称"
+                    title={t("album.copyWorldNameTitle")}
                     onClick={() => {
                       const name = active.world?.worldName?.trim();
-                      if (!name) return setToast("无世界名称可复制");
-                      void copyText(name, "世界名称");
+                      if (!name) return setToast(t("album.noWorldName"));
+                      void copyText(name, t("album.worldNameLabel"));
                     }}
                   >
-                    {active.world?.worldName ?? "世界未知"}
+                    {active.world?.worldName ?? t("album.worldUnknown")}
                   </button>
                   <button
                     type="button"
                     className="truncate text-left text-xs text-white/60 hover:text-white/85"
-                    title="点击复制 WorldID"
+                    title={t("album.copyWorldIdTitle")}
                     onClick={() => {
                       const id = active.world?.worldId?.trim();
-                      if (!id) return setToast("无 WorldID 可复制");
+                      if (!id) return setToast(t("album.noWorldId"));
                       void copyText(id, "WorldID");
                     }}
                   >
@@ -1235,34 +1267,34 @@ export default function Album() {
                 <button
                   type="button"
                   className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10 disabled:opacity-40"
-                  title="保存这张图片到本地"
-                  aria-label="下载图片"
+                  title={t("album.saveImageTitle")}
+                  aria-label={t("album.downloadImageAria")}
                   disabled={!canDownloadActive}
                   onClick={downloadActiveImage}
                 >
                   <span className="inline-flex items-center gap-2">
                     <Download className="h-4 w-4" aria-hidden="true" />
-                    下载
+                    {t("album.download")}
                   </span>
                 </button>
                 <button
                   type="button"
                   className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10"
-                  title="查看更多图片信息"
-                  aria-label="查看更多图片信息"
+                  title={t("album.moreInfo")}
+                  aria-label={t("album.moreInfo")}
                   onClick={() => setIsInfoOpen((v) => !v)}
                 >
                   <span className="inline-flex items-center gap-2">
                     <AlertCircle className="h-4 w-4" aria-hidden="true" />
-                    更多
+                    {t("album.more")}
                   </span>
                 </button>
                 {keySession?.isAdmin ? (
                   <button
                     type="button"
                     className="rounded-xl border border-sky-400/40 bg-sky-500/15 px-3 py-2 text-xs font-extrabold text-sky-100 hover:bg-sky-500/25"
-                    title="把这张照片改成归属另一个 Zone"
-                    aria-label="修改归属 Zone"
+                    title={t("album.changeZoneTitle")}
+                    aria-label={t("album.changeZoneAria")}
                     onClick={() => {
                       setZoneError(null);
                       setZoneResult(null);
@@ -1272,7 +1304,7 @@ export default function Album() {
                   >
                     <span className="inline-flex items-center gap-2">
                       <FolderInput className="h-4 w-4" aria-hidden="true" />
-                      改 Zone
+                      {t("album.changeZone")}
                     </span>
                   </button>
                 ) : null}
@@ -1280,8 +1312,8 @@ export default function Album() {
                   <button
                     type="button"
                     className="rounded-xl border border-red-400/40 bg-red-500/15 px-3 py-2 text-xs font-extrabold text-red-100 hover:bg-red-500/25"
-                    title="删除这张照片（不可恢复）"
-                    aria-label="删除照片"
+                    title={t("album.deleteTitle")}
+                    aria-label={t("album.deleteAria")}
                     onClick={() => {
                       setDeleteError(null);
                       setDeleteResult(null);
@@ -1290,7 +1322,7 @@ export default function Album() {
                   >
                     <span className="inline-flex items-center gap-2">
                       <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      删除
+                      {t("album.delete")}
                     </span>
                   </button>
                 ) : null}
@@ -1304,7 +1336,7 @@ export default function Album() {
                     })
                   }
                 >
-                  上一张 ←
+                  {t("album.previous")}
                 </button>
                 <button
                   type="button"
@@ -1316,14 +1348,14 @@ export default function Album() {
                     })
                   }
                 >
-                  下一张 →
+                  {t("album.next")}
                 </button>
                 <button
                   type="button"
                   className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10"
                   onClick={() => setActiveIndex(null)}
                 >
-                  关闭 Esc
+                  {t("album.closeEsc")}
                 </button>
               </div>
             </div>
@@ -1332,46 +1364,56 @@ export default function Album() {
               <div className="mb-3 rounded-2xl border border-white/10 bg-white/5 p-3 text-xs text-white/80">
                 <div className="flex flex-wrap gap-x-6 gap-y-2">
                   <div>
-                    <span className="text-white/60">文件名：</span>
-                    <span className="font-extrabold break-all">{active.originalName ?? "未知"}</span>
-                  </div>
-                  <div>
-                    <span className="text-white/60">尺寸：</span>
-                    <span className="font-extrabold">
-                      {active.width && active.height ? `${active.width}×${active.height}` : "未知"}
+                    <span className="text-white/60">{t("album.fileNameLabel")}</span>
+                    <span className="font-extrabold break-all">
+                      {active.originalName ?? t("album.unknown")}
                     </span>
                   </div>
                   <div>
-                    <span className="text-white/60">拍摄时间：</span>
-                    <span className="font-extrabold">{active.takenAt ?? "未知"}</span>
+                    <span className="text-white/60">{t("album.sizeLabel")}</span>
+                    <span className="font-extrabold">
+                      {active.width && active.height
+                        ? `${active.width}×${active.height}`
+                        : t("album.unknown")}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-white/60">{t("album.takenAtLabel")}</span>
+                    <span className="font-extrabold">{active.takenAt ?? t("album.unknown")}</span>
                   </div>
                   {/* ---- 以下为排查"是否用错密钥上传"所需的诊断信息 ---- */}
                   <div>
-                    <span className="text-white/60">归属 Zone：</span>
-                    <span className="font-extrabold">{active.zoneId ?? "（未声明）"}</span>
+                    <span className="text-white/60">{t("album.zoneLabel")}</span>
+                    <span className="font-extrabold">
+                      {active.zoneId ?? t("album.zoneNotDeclared")}
+                    </span>
                     <span
                       className={activeZoneKeyOk ? "ml-2 text-emerald-200/90" : "ml-2 text-rose-200/90"}
                     >
-                      {activeZoneKeyOk ? "当前会话持有该区密钥" : "当前会话没有该区密钥"}
+                      {activeZoneKeyOk ? t("album.zoneKeyHeld") : t("album.zoneKeyMissing")}
                     </span>
                   </div>
                   <div>
-                    <span className="text-white/60">加密方式：</span>
+                    <span className="text-white/60">{t("album.encryptionLabel")}</span>
                     <span className="font-extrabold">
                       {active.encrypted === undefined
-                        ? "尚未解密，未知"
+                        ? t("album.encryptionUnknown")
                         : active.encrypted
-                          ? "AES-256-GCM 密文"
-                          : "明文对象（未加密）"}
+                          ? t("album.encryptionCipher")
+                          : t("album.encryptionPlain")}
                     </span>
                   </div>
                   <div>
-                    <span className="text-white/60">上传时密钥指纹：</span>
-                    <span className="font-extrabold">{active.keyFp ?? "（清单未记录）"}</span>
+                    <span className="text-white/60">{t("album.uploadedKeyFpLabel")}</span>
+                    <span className="font-extrabold">
+                      {active.keyFp ?? t("album.fpNotRecorded")}
+                    </span>
                   </div>
                   <div>
-                    <span className="text-white/60">本次解密密钥指纹：</span>
-                    <span className="font-extrabold">{active.decryptKeyFp ?? "（未解密）"}</span>
+                    <span className="text-white/60">{t("album.decryptKeyFpLabel")}</span>
+                    <span className="font-extrabold">
+                      {active.decryptKeyFp ?? t("album.fpNotDecrypted")}
+                    </span>
                   </div>
                   {active.keyFp && active.decryptKeyFp ? (
                     <div
@@ -1382,22 +1424,22 @@ export default function Album() {
                       }
                     >
                       {active.keyFp === active.decryptKeyFp
-                        ? "✓ 加密与解密用的是同一把密钥"
-                        : "⚠️ 加密与解密用的不是同一把密钥（清单记录与实际不符）"}
+                        ? t("album.fpMatch")
+                        : t("album.fpMismatch")}
                     </div>
                   ) : null}
                   {active.encrypted === false ? (
-                    <div className="text-amber-200/90">
-                      ⚠️ 这条是明文对象：没有加密，任何知道该对象键的人都能取到原图
-                    </div>
+                    <div className="text-amber-200/90">{t("album.plainWarning")}</div>
                   ) : null}
                   <div>
-                    <span className="text-white/60">OSS 对象键：</span>
-                    <span className="font-extrabold break-all">{activeObjectKey || "（无）"}</span>
+                    <span className="text-white/60">{t("album.objectKeyLabel")}</span>
+                    <span className="font-extrabold break-all">{activeObjectKey || t("album.none")}</span>
                   </div>
                   <div>
-                    <span className="text-white/60">相对路径：</span>
-                    <span className="font-extrabold break-all">{active.relPath ?? "（未记录）"}</span>
+                    <span className="text-white/60">{t("album.relPathLabel")}</span>
+                    <span className="font-extrabold break-all">
+                      {active.relPath ?? t("album.notRecorded")}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1419,7 +1461,7 @@ export default function Album() {
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="删除照片"
+          aria-label={t("album.deleteAria")}
           onClick={() => {
             if (deleting) return;
             setDeleteTarget(null);
@@ -1433,7 +1475,9 @@ export default function Album() {
           >
             {deleteResult ? (
               <>
-                <div className="text-sm font-extrabold text-amber-200">删除未完全完成</div>
+                <div className="text-sm font-extrabold text-amber-200">
+                  {t("album.deletePartialTitle")}
+                </div>
                 <p className="mt-2 text-xs leading-relaxed text-white/75">{deleteResult}</p>
                 <div className="mt-4 flex justify-end">
                   <button
@@ -1444,20 +1488,23 @@ export default function Album() {
                       setDeleteResult(null);
                     }}
                   >
-                    关闭
+                    {t("album.close")}
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <div className="text-sm font-extrabold text-red-100">确认删除这张照片？</div>
+                <div className="text-sm font-extrabold text-red-100">
+                  {t("album.deleteConfirmTitle")}
+                </div>
                 <p className="mt-2 break-all text-xs text-white/70">
                   {downloadFilename(deleteTarget)}
                 </p>
                 <p className="mt-3 text-xs leading-relaxed text-amber-200/90">
-                  会同时删除 OSS 上的密文文件，
-                  <strong className="text-amber-100">删除后无法恢复</strong>
-                  （存储桶未开启版本控制）。请确认没有其他地方还需要它。
+                  <Trans
+                    i18nKey="album.deleteWarning"
+                    components={{ strong: <strong className="text-amber-100" /> }}
+                  />
                 </p>
                 {deleteError ? (
                   <p className="mt-3 rounded-lg border border-rose-400/30 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-100">
@@ -1474,7 +1521,7 @@ export default function Album() {
                       setDeleteError(null);
                     }}
                   >
-                    取消
+                    {t("album.cancel")}
                   </button>
                   <button
                     type="button"
@@ -1482,7 +1529,7 @@ export default function Album() {
                     className="rounded-xl border border-red-400/50 bg-red-500/30 px-4 py-2 text-xs font-extrabold text-red-50 hover:bg-red-500/40 disabled:opacity-40"
                     onClick={() => void confirmDelete()}
                   >
-                    {deleting ? "正在删除…" : "确认删除"}
+                    {deleting ? t("album.deleting") : t("album.confirmDelete")}
                   </button>
                 </div>
               </>
@@ -1496,7 +1543,7 @@ export default function Album() {
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="修改归属 Zone"
+          aria-label={t("album.changeZoneAria")}
           onClick={() => {
             if (zoneChanging) return;
             setZoneTarget(null);
@@ -1510,7 +1557,9 @@ export default function Album() {
           >
             {zoneResult ? (
               <>
-                <div className="text-sm font-extrabold text-amber-200">已换好，但旧文件没删掉</div>
+                <div className="text-sm font-extrabold text-amber-200">
+                  {t("album.zonePartialTitle")}
+                </div>
                 <p className="mt-2 text-xs leading-relaxed text-white/75">{zoneResult}</p>
                 <div className="mt-4 flex justify-end">
                   <button
@@ -1521,49 +1570,52 @@ export default function Album() {
                       setZoneResult(null);
                     }}
                   >
-                    关闭
+                    {t("album.close")}
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <div className="text-sm font-extrabold text-sky-100">把这张照片换个 Zone</div>
+                <div className="text-sm font-extrabold text-sky-100">
+                  {t("album.zoneDialogTitle")}
+                </div>
                 <p className="mt-2 break-all text-xs text-white/70">{zoneDialog.fileName}</p>
 
                 <div className="mt-3 space-y-1 text-xs text-white/70">
                   <div>
-                    现在的 Zone：
+                    {t("album.zoneCurrentLabel")}
                     <span className="font-extrabold text-white/90">
-                      {zoneDialog.from || "（没记录）"}
+                      {zoneDialog.from || t("album.zoneNotRecorded")}
                     </span>
                   </div>
                   <div>
-                    当前状态：
+                    {t("album.zoneStatusLabel")}
                     <span className="font-extrabold text-white/90">
-                      {zoneDialog.isCipher ? "已加密" : "未加密（这次会顺便加密）"}
+                      {zoneDialog.isCipher
+                        ? t("album.zoneStatusEncrypted")
+                        : t("album.zoneStatusPlain")}
                     </span>
                   </div>
                 </div>
 
                 {!zoneDialog.hasSourceKey ? (
                   <p className="mt-3 rounded-lg border border-rose-400/30 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-100">
-                    你的密钥文件里没有「{zoneDialog.from}」的密钥，打不开这张照片，所以换不了。
-                    请改用包含这个 Zone 的密钥文件。
+                    {t("album.zoneNoSourceKey", { zone: zoneDialog.from })}
                   </p>
                 ) : zoneDialog.options.length === 0 ? (
                   <p className="mt-3 rounded-lg border border-amber-400/30 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-100">
-                    你的密钥文件里没有别的 Zone 可以换。请先到「相册管理 → 创建与管理 Zone」新建一个。
+                    {t("album.zoneNoTargetOptions")}
                   </p>
                 ) : (
                   <label className="mt-3 block text-[11px] text-white/60">
-                    换成哪个 Zone
+                    {t("album.zoneSelectLabel")}
                     <select
-                      aria-label="目标 Zone"
+                      aria-label={t("album.zoneSelectAria")}
                       className="mt-1 w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs text-white"
                       value={zoneTargetId}
                       onChange={(e) => setZoneTargetId(e.target.value)}
                     >
-                      <option value="">请选择</option>
+                      <option value="">{t("album.zoneSelectPlaceholder")}</option>
                       {zoneDialog.options.map((z) => (
                         <option key={z.zoneId} value={z.zoneId}>
                           {z.zoneId}
@@ -1575,9 +1627,7 @@ export default function Album() {
                 )}
 
                 <p className="mt-3 text-[11px] leading-relaxed text-white/55">
-                  照片内容不会被改动。过程是：取回这张照片 → 用现在的密钥解开 → 用新 Zone
-                  的密钥重新加密 → 传成新文件 → 让相册指向它 → 删掉旧文件。
-                  会按原始大小下载并上传一次，所以大图需要等一会儿。
+                  {t("album.zoneProcessNote")}
                 </p>
 
                 {zoneError ? (
@@ -1596,7 +1646,7 @@ export default function Album() {
                       setZoneError(null);
                     }}
                   >
-                    取消
+                    {t("album.cancel")}
                   </button>
                   <button
                     type="button"
@@ -1604,7 +1654,7 @@ export default function Album() {
                     className="rounded-xl border border-sky-400/50 bg-sky-500/30 px-4 py-2 text-xs font-extrabold text-sky-50 hover:bg-sky-500/40 disabled:opacity-40"
                     onClick={() => void confirmChangeZone()}
                   >
-                    {zoneChanging ? "正在迁移…" : "确认换区"}
+                    {zoneChanging ? t("album.zoneChanging") : t("album.zoneConfirm")}
                   </button>
                 </div>
               </>

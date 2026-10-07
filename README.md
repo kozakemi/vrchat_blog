@@ -140,6 +140,25 @@ npm run local
 
 数据与配置的一致性由 `npm run test:local-demo` 钉住：`.env.demo` 是否真的生效、清单里每张图是否都会被生成、清单的 Zone 与演示密钥是否一一对应、以及"关掉演示私密区后每个世界分组各少一张"。
 
+### 多语言（zh / ja / en）
+
+文案全部走 i18next，按命名空间拆开，**三份的 key 集合必须完全一致**：
+
+| 文件 | 内容 |
+|------|------|
+| `src/i18n.ts` | 语言检测与持久化、`<html lang>` 同步，以及登录页与关于页的文案 |
+| `src/locales/{zh,ja,en}/album.ts` | 相册页 |
+| `src/locales/{zh,ja,en}/admin.ts` | 相册管理页 |
+
+几处容易漏、且**漏了不会报错**的地方：
+
+- 切换语言时要同步 `<html lang>`。不做的后果：切到日文后文档语言仍是 `zh`，朗读器会用中文音去读日文、浏览器按中文规则挑 CJK 字体、也不会提示"要不要翻译成中文"。现在由 `i18n.ts` 的 `languageChanged` 监听负责。
+- 语言切换器在**四个页面都要有**（登录、关于、相册、管理）。曾经只有前两个，进了相册就再也切不了。
+- **刻意不翻译的东西**：`src/lib/**` 抛出的技术诊断消息（例如"读取现有清单失败：HTTP 500"）保持中文——它们是写给运营者排查用的，界面上以「技术细节」的可展开区域原样呈现，外层说明一律本地化。同理，`console.*` 里的 `[album] 图片诊断` 等输出也保持中文。
+- `index.html` 里的 `<meta name="description">` 是静态中文（爬虫读到的是它，JS 改它对 SEO 没意义），`<html lang="zh">` 只是 JS 接管前的默认值。
+
+回归测试 **`npm run test:i18n`** 查五件事：三语 key 是否逐个对齐、有没有空文案、代码里 `t("...")` 引用的每个 key 是否都取得到、**页面组件里有没有残留硬编码中文**（注释与 `console.*` 除外）、以及切换语言时 `<html lang>` 是否同步。新加文案忘了走 `t()`，这里会直接红。
+
 ### 测试
 
 各套测试都是本地 node 脚本，用内存桩替代 OSS 与浏览器，**不联网、不碰线上数据**：
@@ -147,6 +166,7 @@ npm run local
 | 命令 | 覆盖 |
 |------|------|
 | `npm run check` / `npm run lint` / `npm run build` | 类型检查、代码风格、构建 |
+| `npm run test:i18n` | 多语言：三语 key 对齐、无硬编码中文、`<html lang>` 同步 |
 | `npm run test:album-access` | Zone 准入判定（含"只要声明了 `zoneId` 就必须持有密钥"） |
 | `npm run test:album-delete` | 删除顺序（先改清单、后删密文）与孤儿对象处理 |
 | `npm run test:album-zone-change` | 改归属 Zone：重新加密、绝不就地覆盖、失败可恢复 |
