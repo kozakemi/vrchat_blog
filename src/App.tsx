@@ -1,6 +1,7 @@
 import Home from "@/pages/Home";
 import Album from "@/pages/Album";
 import AlbumAdmin from "@/pages/AlbumAdmin";
+import About from "@/pages/About";
 import { HashRouter, Route, Routes } from "react-router-dom";
 
 export default function App() {
@@ -8,6 +9,7 @@ export default function App() {
     <HashRouter>
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/about" element={<About />} />
         <Route path="/album" element={<Album />} />
         <Route path="/album-admin" element={<AlbumAdmin />} />
         <Route path="*" element={<Home />} />

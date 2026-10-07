@@ -843,6 +843,12 @@ export default function Album() {
               管理
             </Link>
           ) : null}
+          <Link
+            to="/about"
+            className="shrink-0 rounded-xl border border-white/15 bg-black/15 px-3 py-1.5 text-[11px] font-extrabold text-white/70 backdrop-blur hover:bg-black/30"
+          >
+            关于
+          </Link>
         </div>
 
         <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-white/15 bg-black/15 p-1 backdrop-blur">

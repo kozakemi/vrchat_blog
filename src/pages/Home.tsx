@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import i18n, { persistLanguage } from "@/i18n";
+import { LanguageSwitch } from "@/components/LanguageSwitch";
 import { clearAlbumBlobCache } from "@/lib/albumBlobCache";
 import {
   isAdminKeyFile,
@@ -13,21 +13,6 @@ import {
 } from "@/lib/keyFile";
 import { PUBLIC_ZONES, canSelfRegister } from "@/lib/publicZones";
 import { isSessionPersistenceAvailable, useSessionAuthStore } from "@/store/sessionAuthStore";
-
-const LANG_CYCLE = ["zh", "ja", "en"] as const;
-type AppLanguage = (typeof LANG_CYCLE)[number];
-
-function getNextLanguage(current: string): AppLanguage {
-  const currentIndex = LANG_CYCLE.indexOf(current as AppLanguage);
-  if (currentIndex === -1) return LANG_CYCLE[0];
-  return LANG_CYCLE[(currentIndex + 1) % LANG_CYCLE.length];
-}
-
-function getLanguageLabel(language: string) {
-  if (language === "zh") return "中文";
-  if (language === "ja") return "日本語";
-  return "English";
-}
 
 type Tab = "login" | "register";
 
@@ -41,7 +26,7 @@ type Tab = "login" | "register";
  * 相册页/管理页只认这个会话，不再有独立的准入标记。
  */
 export default function Home() {
-  const { t, i18n: i18nInstance } = useTranslation();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const keySession = useSessionAuthStore((s) => s.keySession);
@@ -154,19 +139,14 @@ export default function Home() {
     setTab("login");
   }
 
-  const languageLabel = getLanguageLabel(i18nInstance.language);
-  const langSwitch = (
-    <button
-      className="lang-switch"
-      type="button"
-      onClick={() => {
-        const next = getNextLanguage(i18nInstance.language);
-        void i18n.changeLanguage(next);
-        persistLanguage(next);
-      }}
+  /** 底部的「关于」入口：公开页面，未登录也能看 */
+  const aboutLink = (
+    <Link
+      to="/about"
+      className="mt-4 text-[11px] font-bold tracking-wide text-white/50 underline-offset-4 hover:text-white/80 hover:underline"
     >
-      {languageLabel}
-    </button>
+      {t("about")}
+    </Link>
   );
 
   /** 浏览器禁用本地存储时（隐私模式 / 阻止所有 Cookie），登录态无法保留，必须如实告知 */
@@ -216,8 +196,9 @@ export default function Home() {
                 </div>
               </div>
             </div>
+            {aboutLink}
           </div>
-          {langSwitch}
+          <LanguageSwitch className="lang-switch" />
         </div>
       </div>
     );
@@ -322,6 +303,7 @@ export default function Home() {
               </div>
             </div>
           </div>
+          {aboutLink}
         </div>
 
         <button
@@ -332,7 +314,7 @@ export default function Home() {
         >
           ?
         </button>
-        {langSwitch}
+        <LanguageSwitch className="lang-switch" />
       </div>
 
       {isHelpOpen

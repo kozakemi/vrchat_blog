@@ -3,7 +3,24 @@ import { initReactI18next } from "react-i18next";
 
 const STORAGE_KEY = "td_lang";
 
-type AppLanguage = "zh" | "ja" | "en";
+/** 站内支持的语言，顺序即切换按钮的循环顺序 */
+export const APP_LANGUAGES = ["zh", "ja", "en"] as const;
+
+export type AppLanguage = (typeof APP_LANGUAGES)[number];
+
+/** 循环切到下一个语言（登录页与关于页共用，避免各写一份而走样） */
+export function getNextLanguage(current: string): AppLanguage {
+  const currentIndex = APP_LANGUAGES.indexOf(current as AppLanguage);
+  if (currentIndex === -1) return APP_LANGUAGES[0];
+  return APP_LANGUAGES[(currentIndex + 1) % APP_LANGUAGES.length];
+}
+
+/** 切换按钮上显示的语言名（始终用该语言自己的写法，而不是当前界面语言） */
+export function getLanguageLabel(language: string): string {
+  if (language === "zh") return "中文";
+  if (language === "ja") return "日本語";
+  return "English";
+}
 
 function normalizeToAppLanguage(language: string): AppLanguage {
   const lower = language.toLowerCase();
@@ -54,6 +71,20 @@ i18n.use(initReactI18next).init({
         loginHelpTitle: "使用说明",
         loginHelpBody:
           "第一次来：切到「注册」，填个昵称，会下载一个密钥文件——请把它保存在你找得到的地方，下次靠它进来。\n已经有密钥文件：切到「密钥登录」，选择那个文件即可。",
+        about: "关于",
+        aboutTitle: "关于本站",
+        aboutBack: "返回",
+        aboutAuthorLabel: "作者",
+        aboutLinkGithub: "GitHub 主页",
+        aboutLinkBilibili: "哔哩哔哩主页",
+        aboutLinkRepo: "本项目源码",
+        aboutAiTitle: "制作方式",
+        aboutAiBody:
+          "本项目由 AI 制作：最初由 Trae 创建，之后由 DeepSeek Harness 修改完善。",
+        aboutDisclaimerTitle: "免责声明",
+        aboutDisclaimerBody:
+          "非官方的个人项目，与 VRChat Inc. 没有任何关联。相册中的照片版权归拍摄者与原作者所有。",
+        aboutEnterAlbum: "进入相册",
       },
     },
     ja: {
@@ -82,6 +113,20 @@ i18n.use(initReactI18next).init({
         loginHelpTitle: "使い方",
         loginHelpBody:
           "はじめての方：「新規登録」でニックネームを入力するとキーファイルがダウンロードされます。次回のために保管してください。\nすでにキーファイルをお持ちの方：「キーでログイン」でそのファイルを選んでください。",
+        about: "このサイトについて",
+        aboutTitle: "このサイトについて",
+        aboutBack: "戻る",
+        aboutAuthorLabel: "作者",
+        aboutLinkGithub: "GitHub",
+        aboutLinkBilibili: "bilibili",
+        aboutLinkRepo: "ソースコード",
+        aboutAiTitle: "制作について",
+        aboutAiBody:
+          "本プロジェクトは AI によって制作されました。初期作成は Trae、その後の修正・改善は DeepSeek Harness によるものです。",
+        aboutDisclaimerTitle: "免責事項",
+        aboutDisclaimerBody:
+          "非公式の個人プロジェクトであり、VRChat Inc. とは一切関係ありません。掲載写真の著作権は撮影者・原作者に帰属します。",
+        aboutEnterAlbum: "アルバムへ",
       },
     },
     en: {
@@ -110,6 +155,20 @@ i18n.use(initReactI18next).init({
         loginHelpTitle: "How to use",
         loginHelpBody:
           "First time here: switch to “Register”, type a nickname, and a key file will be downloaded — keep it somewhere you will find again.\nAlready have a key file: switch to “Key login” and choose that file.",
+        about: "About",
+        aboutTitle: "About this site",
+        aboutBack: "Back",
+        aboutAuthorLabel: "Author",
+        aboutLinkGithub: "GitHub",
+        aboutLinkBilibili: "bilibili",
+        aboutLinkRepo: "Source code",
+        aboutAiTitle: "How it was made",
+        aboutAiBody:
+          "This project was built by AI: initially created by Trae, then revised and completed by DeepSeek Harness.",
+        aboutDisclaimerTitle: "Disclaimer",
+        aboutDisclaimerBody:
+          "An unofficial personal project, not affiliated with VRChat Inc. Photos belong to their respective photographers and authors.",
+        aboutEnterAlbum: "Enter album",
       },
     },
   },
