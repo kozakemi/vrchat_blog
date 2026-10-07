@@ -30,6 +30,19 @@
 - **分支**：`main`
 - **自动构建**：每次 push 到 main 分支时自动触发构建与部署。
 
+### 相册上传检查
+
+上传使用浏览器直连 OSS。桶的 CORS 必须允许 `https://vrchat.kozakemi.top` 的 `PUT`
+及 `Content-Type` 请求头；只允许 `GET` 时，读取相册正常但上传预检会返回 403。
+GitHub Actions 只部署静态页面，不会更新 OSS CORS。
+
+- `node tools/oss-upload-cors.mjs`：读取配置并检查线上 PUT 预检。
+- `node tools/oss-upload-cors.mjs --apply`：先备份到已忽略的 `keys/`，保留原规则，补充站点上传规则。
+- `node tools/album-upload-smoke.mjs --confirm-write`：实际测试加密、上传、清单合并、回读、解密，再还原清单并清理测试对象。测试期间避免其他管理员同时上传。
+
+脚本使用本机 `keys/oss.json`，冒烟测试另需 `keys/kozakemi.admin.json`。
+管理页可导入 OSS JSON 文件，也可粘贴后保存；凭据仅保存在当前标签页会话中，勿提交到仓库或构建产物。
+
 ## 📅 开发计划
 
 - [x] 静态首页搭建

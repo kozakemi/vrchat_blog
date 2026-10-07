@@ -37,13 +37,22 @@ export async function putObjectWithSignedUrl(
   contentType: string,
 ): Promise<void> {
   const fetchUrl = rewriteOssUrlForDevFetch(resolveSignedUrlToAbsolute(putUrl));
-  const res = await fetch(fetchUrl, {
-    method: "PUT",
-    body,
-    headers: { "Content-Type": contentType },
-    mode: "cors",
-    referrerPolicy: "strict-origin-when-cross-origin",
-  });
+  let res: Response;
+  try {
+    res = await fetch(fetchUrl, {
+      method: "PUT",
+      body,
+      headers: { "Content-Type": contentType },
+      mode: "cors",
+      referrerPolicy: "strict-origin-when-cross-origin",
+    });
+  } catch {
+    // 跨域预检被拒时浏览器只抛网络错误，无法读取 OSS 的 XML 错误正文。
+    throw new Error(
+      "上传请求未收到可读响应：请检查网络，以及 OSS 桶的 CORS 是否允许当前站点的 PUT 方法和 Content-Type 请求头。" +
+        "仅允许 GET 会导致相册能读取但无法上传。",
+    );
+  }
   if (!res.ok) {
     const hint =
       res.status === 403

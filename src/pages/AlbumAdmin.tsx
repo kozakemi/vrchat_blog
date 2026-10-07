@@ -508,6 +508,7 @@ export default function AlbumAdmin() {
                 OSS 上传配置（点击「加密并上传到 OSS」前<strong className="text-cyan-50">必填</strong>）
               </div>
               <textarea
+                aria-label="OSS 上传配置 JSON"
                 className="h-40 w-full resize-y rounded-lg border border-white/15 bg-black/50 p-2 font-mono text-[11px] leading-relaxed text-white/90 outline-none focus:border-cyan-400/50"
                 spellCheck={false}
                 autoComplete="off"
@@ -515,6 +516,34 @@ export default function AlbumAdmin() {
                 onChange={(e) => setOssJsonDraft(e.target.value)}
               />
               <div className="mt-2 flex flex-wrap gap-2">
+                <label className="cursor-pointer rounded-lg border border-cyan-400/40 px-3 py-1.5 text-[11px] text-cyan-50">
+                  导入 OSS JSON
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    aria-label="导入 OSS JSON"
+                    className="sr-only"
+                    disabled={busy}
+                    onChange={async (e) => {
+                      const file = e.currentTarget.files?.[0];
+                      e.currentTarget.value = "";
+                      if (!file) return;
+                      try {
+                        const text = await file.text();
+                        const result = saveOssConfigToSession(text);
+                        if (result.ok === false) {
+                          setLastMsg(`OSS 配置导入失败：${result.error}`);
+                          return;
+                        }
+                        setOssJsonDraft(text);
+                        setOssUploadConfig(result.config);
+                        setLastMsg("OSS 上传配置已导入并保存（仅当前标签页会话）");
+                      } catch {
+                        setLastMsg("OSS 配置文件读取或保存失败，请重试");
+                      }
+                    }}
+                  />
+                </label>
                 <button
                   type="button"
                   className="rounded-lg border border-cyan-400/40 bg-cyan-500/20 px-3 py-1.5 text-[11px] font-extrabold text-cyan-50 hover:bg-cyan-500/30"
