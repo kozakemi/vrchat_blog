@@ -133,6 +133,59 @@ body::after {
   }
 }
 
+/* 登录页顶部的 THOSE DAYS 标识（自首屏移除后重新加回） */
+.logo-bubble {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 32px;
+}
+
+.logo-box {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 2.5px solid rgba(255, 255, 255, 0.92);
+  border-radius: 12px;
+  padding: 10px 20px;
+  gap: 10px;
+  background: transparent;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+}
+
+.logo-box::after {
+  content: "";
+  position: absolute;
+  right: 18px;
+  bottom: -16px;
+  width: 0;
+  height: 0;
+  border-left: 12px solid transparent;
+  border-right: 0 solid transparent;
+  border-top: 16px solid rgba(255, 255, 255, 0.92);
+}
+
+.logo-those {
+  font-size: 36px;
+  font-weight: 900;
+  color: rgba(255, 255, 255, 0.96);
+  letter-spacing: 2px;
+  line-height: 1;
+}
+
+.logo-days-wrap {
+  background: rgba(255, 255, 255, 0.96);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+
+.logo-days {
+  font-size: 36px;
+  font-weight: 900;
+  color: rgba(10, 14, 15, 0.92);
+  letter-spacing: 2px;
+  line-height: 1;
+}
+
 .login-card {
   width: min(420px, 86vw);
   background: rgba(255, 255, 255, 0.06);

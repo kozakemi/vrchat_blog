@@ -39,6 +39,8 @@ GitHub Actions 只部署静态页面，不会更新 OSS CORS。
 - `node tools/oss-upload-cors.mjs`：读取配置并检查线上 PUT 预检。
 - `node tools/oss-upload-cors.mjs --apply`：先备份到已忽略的 `keys/`，保留原规则，补充站点上传规则。
 - `node tools/album-upload-smoke.mjs --confirm-write`：实际测试加密、上传、清单合并、回读、解密，再还原清单并清理测试对象。测试期间避免其他管理员同时上传。
+- `npm run test:album-access`：Zone 权限判定与解密缓存隔离（不联网）。覆盖「私有区照片不得因缓存而对无权身份可见」。
+- `npm run test:image-size`：图片文件头尺寸解析（PNG / GIF / JPEG / WebP）。
 
 脚本使用本机 `keys/oss.json`，冒烟测试另需 `keys/kozakemi.admin.json`。
 管理页可导入 OSS JSON 文件，也可粘贴后保存；凭据仅保存在当前标签页会话中，勿提交到仓库或构建产物。

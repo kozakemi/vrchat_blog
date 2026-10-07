@@ -1,24 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
+import { checkAssetAccess, filterAccessibleAssets } from "@/lib/albumAccess";
+import {
+  blobCacheObjectKey,
+  getAuthorizedCachedBlobUrl,
+  putAlbumBlobUrl,
+  sessionFingerprint,
+  syncAlbumBlobCacheToSession,
+} from "@/lib/albumBlobCache";
 import { base64ToBytes, buildAadJson, importAesGcmKey } from "@/lib/albumCrypto";
 import { fetchAlbumManifestOrThrow } from "@/lib/albumManifestFetch";
+import { readImageSize, readU32BE } from "@/lib/imageSize";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { fetchSignedUrlForOssObject, invalidateSignedUrlCacheForObjectKey } from "@/lib/ossSignFetch";
 import { cn } from "@/lib/utils";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Download } from "lucide-react";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 type AlbumViewMode = "time" | "world";
-
-type BlobUrlCacheEntry = {
-  objectUrl: string;
-  createdAt: number;
-  lastUsedAt: number;
-};
-
-// 控制内存：最多缓存 N 张解码后的 Blob URL（不影响 UI，只影响性能/内存）
-const BLOB_URL_CACHE_MAX = 180;
-const blobUrlCache = new Map<string, BlobUrlCacheEntry>();
 
 type AlbumAsset = {
   assetId: string;
@@ -57,11 +56,31 @@ type AlbumManifest = {
 
 type AssetResolvedMetadata = {
   takenAt?: string;
+  /** 从明文字节里读出的真实像素尺寸：清单里没有时靠它补上 */
+  width?: number;
+  height?: number;
   world?: {
     worldId?: string | null;
     worldName?: string | null;
   };
 };
+
+const EXT_BY_MIME: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+};
+
+/** 下载文件名：优先用原始文件名（用户认得），否则用 assetId + 按 MIME 推断的后缀 */
+function downloadFilename(asset: AlbumAsset) {
+  const base = asset.originalName?.split("/").pop()?.trim();
+  if (base) return base;
+  const mime = (asset.mime ?? asset.aad?.mime ?? "").toLowerCase();
+  return `${asset.assetId}${EXT_BY_MIME[mime] ?? ""}`;
+}
 
 function toTs(iso?: string) {
   if (!iso) return Number.NEGATIVE_INFINITY;
@@ -99,15 +118,6 @@ function inferTakenAt(asset: AlbumAsset) {
     parseTakenAtFromName(asset.file) ||
     parseTakenAtFromName(asset.src ?? undefined)
   );
-}
-
-function readU32BE(bytes: Uint8Array, offset: number) {
-  return (
-    (bytes[offset] << 24) |
-    (bytes[offset + 1] << 16) |
-    (bytes[offset + 2] << 8) |
-    bytes[offset + 3]
-  ) >>> 0;
 }
 
 function pickXmpField(xml: string, tagName: string) {
@@ -188,7 +198,11 @@ async function extractPngXmp(bytes: Uint8Array) {
 
 async function resolveMetadataFromPlainBytes(asset: AlbumAsset, bytes: Uint8Array) {
   const mime = asset.mime?.toLowerCase() ?? "";
-  const out: AssetResolvedMetadata = { takenAt: inferTakenAt(asset) };
+  const size = readImageSize(bytes);
+  const out: AssetResolvedMetadata = {
+    takenAt: inferTakenAt(asset),
+    ...(size ? { width: size.width, height: size.height } : {}),
+  };
   const isPng =
     mime.includes("png") ||
     (bytes.length >= 4 &&
@@ -206,24 +220,13 @@ async function resolveMetadataFromPlainBytes(asset: AlbumAsset, bytes: Uint8Arra
   const worldName = pickXmpField(xmp, "WorldDisplayName");
 
   return {
+    ...out,
     takenAt: takenAt || out.takenAt,
     world: {
       worldId: worldId || null,
       worldName: worldName || null,
     },
   };
-}
-
-function evictBlobCacheIfNeeded() {
-  if (blobUrlCache.size <= BLOB_URL_CACHE_MAX) return;
-  // 按最久未使用淘汰
-  const items = [...blobUrlCache.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
-  const removeCount = Math.max(1, blobUrlCache.size - BLOB_URL_CACHE_MAX);
-  for (let i = 0; i < removeCount; i++) {
-    const [key, entry] = items[i];
-    URL.revokeObjectURL(entry.objectUrl);
-    blobUrlCache.delete(key);
-  }
 }
 
 async function fetchAsBlobUrl(asset: AlbumAsset, signedUrl: string, mimeFallback?: string) {
@@ -288,26 +291,35 @@ function useAssetImageUrl(
   useEffect(() => {
     let cancelled = false;
     const abort = new AbortController();
-    const objectKey = file || cipherFile || "";
-    const zoneKeyB64 =
-      asset.zoneId && keySession?.zones
-        ? keySession.zones.find((z) => z.zoneId === asset.zoneId)?.keyB64
-        : undefined;
+    const objectKey = blobCacheObjectKey(asset);
 
     if (!file && !cipherFile) {
       setUrl(fallback);
       return;
     }
 
-    // 1) 优先命中 Blob URL 缓存（避免重复下载）
-    const blobCached = objectKey ? blobUrlCache.get(objectKey) : undefined;
-    if (blobCached) {
-      blobCached.lastUsedAt = Date.now();
-      setUrl(blobCached.objectUrl);
+    // 1) 先鉴权：没有对应 Zone 密钥就既不查缓存、也不下载。
+    //    这两步的顺序绝不能反——缓存里存的是**已解密的明文图片**。
+    //    先前置查缓存，会导致"用管理员密钥看过的私有照片，在换成只有公开区的
+    //    密钥文件后仍从缓存里显示出来"，也就是私有区照片对无权身份可见。
+    const access = checkAssetAccess(asset, keySession?.zones);
+    if (!access.allowed) {
+      console.warn(`[album] 跳过无权资源 ${asset.assetId}：${access.reason}`);
+      setUrl(undefined);
       return;
     }
 
-    // 2) 先拿签名 URL，再 fetch 成 blob，最后转成 ObjectURL 给 <img>
+    // 2) 已鉴权后才允许命中 Blob URL 缓存（避免重复下载）
+    const cached = getAuthorizedCachedBlobUrl(asset, keySession?.zones);
+    if (cached) {
+      setUrl(cached.objectUrl);
+      // 把当初解析出的元数据一并回填，否则重进相册（清单重载会清空
+      // resolvedMetaById）时会因命中缓存而跳过解析，尺寸又变回"未知"
+      if (cached.meta) onResolvedMetadata?.(asset.assetId, cached.meta);
+      return;
+    }
+
+    // 3) 先拿签名 URL，再 fetch 成 blob，最后转成 ObjectURL 给 <img>
     setUrl(undefined);
     const run = async () => {
       if (file) {
@@ -317,8 +329,7 @@ function useAssetImageUrl(
       }
 
       if (!cipherFile) throw new Error("缺少可读取的对象键");
-      if (!asset.zoneId) throw new Error("密文资源缺少 zoneId");
-      if (!zoneKeyB64) throw new Error(`缺少 Zone「${asset.zoneId}」的解密密钥`);
+      if (!access.zoneKeyB64) throw new Error(`缺少 Zone「${asset.zoneId ?? "?"}」的解密密钥`);
       if (!asset.nonceB64?.trim()) throw new Error("密文资源缺少 nonceB64");
 
       const signed = await fetchSignedUrlForOssObject(cipherFile);
@@ -332,7 +343,7 @@ function useAssetImageUrl(
       return fetchCipherBlobUrl(
         asset,
         signed,
-        zoneKeyB64,
+        access.zoneKeyB64,
         asset.nonceB64,
         aadJson,
         asset.mime || asset.aad?.mime || undefined,
@@ -346,12 +357,7 @@ function useAssetImageUrl(
           return;
         }
 
-        blobUrlCache.set(objectKey, {
-          objectUrl,
-          createdAt: Date.now(),
-          lastUsedAt: Date.now(),
-        });
-        evictBlobCacheIfNeeded();
+        putAlbumBlobUrl(objectKey, objectUrl, meta);
         setUrl(objectUrl);
         if (meta) onResolvedMetadata?.(asset.assetId, meta);
       })
@@ -393,6 +399,8 @@ export default function Album() {
   // lightbox
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [isInfoOpen, setIsInfoOpen] = useState(false);
+  /** 大图当前的 Blob URL，供「下载」使用；换图或关闭灯箱时清空 */
+  const [activeBlobUrl, setActiveBlobUrl] = useState<string | undefined>(undefined);
 
   // 轻量提示（复制到剪贴板）
   const [toast, setToast] = useState<string | null>(null);
@@ -424,8 +432,28 @@ export default function Album() {
     };
   }, [BATCH_SIZE]);
 
+  /**
+   * 会话变化（退出登录 / 换密钥文件）时必须丢弃已解密的图片。
+   * 缓存里存的是明文，跨会话复用等于让上一份密钥解出的照片继续可见。
+   */
+  const sessionKey = sessionFingerprint(keySession?.username, keySession?.zones);
+  useEffect(() => {
+    syncAlbumBlobCacheToSession(sessionKey);
+  }, [sessionKey]);
+
+  /**
+   * 只渲染当前身份有权查看的资源。
+   * 不能直接把清单里的 assets 全渲染出来：无权资源的**文件名、拍摄时间、世界名**
+   * 会照样出现在页面上——图片解不开，但元数据已经泄露了。
+   */
+  const accessibleAssets = useMemo(
+    () => filterAccessibleAssets(manifest?.assets ?? [], keySession?.zones),
+    [manifest, keySession?.zones],
+  );
+  const hiddenCount = (manifest?.assets.length ?? 0) - accessibleAssets.length;
+
   const timeSorted = useMemo(() => {
-    const assets = manifest?.assets ?? [];
+    const assets = accessibleAssets;
     return [...assets]
       .map((a) => {
         const extra = resolvedMetaById[a.assetId];
@@ -438,7 +466,7 @@ export default function Album() {
         return { ...merged, _takenAtTs: toTs(merged.takenAt) };
       })
       .sort((a, b) => b._takenAtTs - a._takenAtTs);
-  }, [manifest, resolvedMetaById]);
+  }, [accessibleAssets, resolvedMetaById]);
 
   const handleResolvedMetadata = useMemo(
     () => (assetId: string, meta: AssetResolvedMetadata) => {
@@ -564,9 +592,28 @@ export default function Album() {
   }, [toast]);
 
   useEffect(() => {
-    // 切换图片或关闭 lightbox 时，默认关闭“更多信息”
+    // 切换图片或关闭 lightbox 时，默认关闭“更多信息”，并清掉上一张的下载地址
     setIsInfoOpen(false);
+    setActiveBlobUrl(undefined);
   }, [activeIndex]);
+
+  /** 只有 blob: URL 才能可靠地"另存为"；跨域的 src 兜底会被浏览器忽略 download */
+  const canDownloadActive = Boolean(activeBlobUrl?.startsWith("blob:"));
+
+  /** 下载当前大图：直接复用已解密并展示中的 Blob URL，不重新下载 */
+  function downloadActiveImage() {
+    if (!active || !activeBlobUrl || !canDownloadActive) {
+      setToast("图片还没准备好，请稍后再试");
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = activeBlobUrl;
+    a.download = downloadFilename(active);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setToast("已开始下载");
+  }
 
   async function copyText(text: string, label: string) {
     try {
@@ -669,13 +716,20 @@ export default function Album() {
             <>
               <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-white/70">
                 <div>
-                  共 <span className="font-extrabold text-white/90">{manifest.assets.length}</span> 张
+                  共 <span className="font-extrabold text-white/90">{accessibleAssets.length}</span> 张
+                  {hiddenCount > 0 ? (
+                    <span className="ml-2 text-white/45">
+                      （另有 {hiddenCount} 张不在当前身份的权限内）
+                    </span>
+                  ) : null}
                 </div>
               </div>
 
-              {manifest.assets.length === 0 ? (
+              {accessibleAssets.length === 0 ? (
                 <div className="mt-10 text-center text-sm font-bold text-white/70">
-                  相册暂无照片，管理员上传后会自动显示。
+                  {hiddenCount > 0
+                    ? "这里的照片不在当前身份的权限内。"
+                    : "相册暂无照片，管理员上传后会自动显示。"}
                 </div>
               ) : null}
 
@@ -869,6 +923,19 @@ export default function Album() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10 disabled:opacity-40"
+                  title="保存这张图片到本地"
+                  aria-label="下载图片"
+                  disabled={!canDownloadActive}
+                  onClick={downloadActiveImage}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Download className="h-4 w-4" aria-hidden="true" />
+                    下载
+                  </span>
+                </button>
+                <button
+                  type="button"
                   className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10"
                   title="查看更多图片信息"
                   aria-label="查看更多图片信息"
@@ -935,7 +1002,11 @@ export default function Album() {
             ) : null}
 
             <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/30">
-              <ActiveImage asset={active} onResolvedMetadata={handleResolvedMetadata} />
+              <ActiveImage
+                asset={active}
+                onResolvedMetadata={handleResolvedMetadata}
+                onBlobUrlChange={setActiveBlobUrl}
+              />
             </div>
           </div>
         </div>
@@ -982,13 +1053,21 @@ function TimeCardImage({
 function ActiveImage({
   asset,
   onResolvedMetadata,
+  onBlobUrlChange,
 }: {
   asset: AlbumAsset;
   onResolvedMetadata?: (assetId: string, meta: AssetResolvedMetadata) => void;
+  /** 把当前解密后的 Blob URL 交给父组件，供「下载」按钮直接复用 */
+  onBlobUrlChange?: (url: string | undefined) => void;
 }) {
   const [retry, setRetry] = useState(0);
   const url = useAssetImageUrl(asset, retry, onResolvedMetadata);
   const objectKey = asset.file?.trim() || asset.cipherFile?.trim() || "";
+
+  useEffect(() => {
+    onBlobUrlChange?.(url);
+  }, [url, onBlobUrlChange]);
+
   return url ? (
     <img
       src={url}

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import i18n, { persistLanguage } from "@/i18n";
+import { clearAlbumBlobCache } from "@/lib/albumBlobCache";
 import {
   isAdminKeyFile,
   keyFileToDownloadJson,
@@ -143,6 +144,8 @@ export default function Home() {
   }
 
   function handleLogout() {
+    // 退出时立刻丢弃已解密的图片缓存，避免残留可被后续低权限会话复用
+    clearAlbumBlobCache();
     setKeySession(null);
     setKeyFile(null);
     setNickname("");
@@ -166,12 +169,25 @@ export default function Home() {
     </button>
   );
 
+  /** 站点标识：登录页顶部原有的 THOSE DAYS 标志 */
+  const logo = (
+    <div className="logo-bubble" aria-label="Those Days">
+      <div className="logo-box">
+        <span className="logo-those">THOSE</span>
+        <div className="logo-days-wrap">
+          <span className="logo-days">DAYS</span>
+        </div>
+      </div>
+    </div>
+  );
+
   // ---- 已登录：给一个明确的「进入相册」，并保留退出登录 ----
   if (keySession) {
     return (
       <div className="scene">
         <div className="panel" role="region" aria-label={t("login")}>
           <div className="panel-content">
+            {logo}
             <div className="login-card" role="group" aria-label={t("login")}>
               <div className="login-card-header">{t("login")}</div>
               <div className="login-card-body">
@@ -205,6 +221,7 @@ export default function Home() {
     <div className="scene">
       <div className="panel" role="region" aria-label={t("login")}>
         <div className="panel-content">
+          {logo}
           <div className="login-card" role="group" aria-label={t("login")}>
             <div className="login-card-header">{t("login")}</div>
             <div className="login-card-body">
