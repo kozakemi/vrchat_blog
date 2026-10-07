@@ -4,7 +4,11 @@ import JSZip from "jszip";
 import { encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
 import { hasAlbumRouteAccess } from "@/lib/authGate";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
-import { fetchExistingManifestForMerge, getManifestObjectKey } from "@/lib/albumManifestFetch";
+import {
+  buildMergedManifest,
+  fetchExistingManifestForMerge,
+  getManifestObjectKey,
+} from "@/lib/albumManifestFetch";
 import { getAlbumManifestUrl } from "@/lib/manifestUrl";
 import { getOssSignEndpoint } from "@/lib/ossSignFetch";
 import {
@@ -272,27 +276,15 @@ export default function AlbumAdmin() {
     ossCfg: OssUploadConfig,
   ): Promise<{ previousCount: number; mergedCount: number }> {
     const current = await fetchExistingManifestForMerge();
-    const prevAssets = current.status === "ok" ? current.payload.assets : [];
-    const schemaVersion = current.status === "ok" ? current.payload.schemaVersion : 1;
+    // 合并本身是纯函数（src/lib/albumManifestFetch.ts），可被测试直接覆盖；
+    // 它会原样保留清单里除 assets 之外的顶层字段，不再硬编码重建整个根对象。
+    const { doc, previousCount } = buildMergedManifest(
+      current,
+      newAssets,
+      new Date().toISOString(),
+    );
 
-    const byId = new Map<string, Record<string, unknown>>();
-    for (const a of prevAssets) {
-      const id = (a as { assetId?: string }).assetId;
-      if (typeof id === "string") byId.set(id, a as Record<string, unknown>);
-    }
-    const previousCount = byId.size;
-    for (const a of newAssets) {
-      const id = a.assetId as string;
-      if (typeof id === "string") byId.set(id, a);
-    }
-
-    const merged = {
-      schemaVersion: schemaVersion ?? 1,
-      generatedAt: new Date().toISOString(),
-      assetsBasePath: "/albums/",
-      assets: [...byId.values()],
-    };
-    const body = JSON.stringify(merged, null, 2);
+    const body = JSON.stringify(doc, null, 2);
     const objectKey = getManifestObjectKey();
     const putUrl = await resolvePutSignedUrl(objectKey, ossCfg, "application/json");
     await putObjectWithSignedUrl(putUrl, new Blob([body], { type: "application/json" }), "application/json");
@@ -306,10 +298,24 @@ export default function AlbumAdmin() {
         .map((a) => (a as { assetId?: string }).assetId)
         .filter((v): v is string => typeof v === "string"),
     );
-    const lost = [...byId.keys()].filter((id) => !afterIds.has(id));
+    const expectedIds = (doc.assets as { assetId?: unknown }[])
+      .map((a) => a.assetId)
+      .filter((v): v is string => typeof v === "string");
+    const lost = expectedIds.filter((id) => !afterIds.has(id));
     if (lost.length) {
       throw new Error(
         `清单回读校验不通过：${lost.length} 条记录不在写入结果中（如 ${lost.slice(0, 3).join(", ")}），可能存在并发写入或被覆盖`,
+      );
+    }
+    // 顶层字段也必须能回读出来（防止归一化把 assetsBasePath 之类的字段吃掉）
+    const knownTopLevel = new Set(["assets", "schemaVersion", "generatedAt"]);
+    const afterExtra = after.payload.extra ?? {};
+    const lostTopLevel = Object.keys(doc).filter(
+      (k) => !knownTopLevel.has(k) && !(k in afterExtra),
+    );
+    if (lostTopLevel.length) {
+      throw new Error(
+        `清单回读校验不通过：写回的顶层字段 ${lostTopLevel.join(", ")} 未出现在回读结果中`,
       );
     }
     return { previousCount, mergedCount: afterIds.size };

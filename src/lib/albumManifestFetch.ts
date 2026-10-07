@@ -10,51 +10,125 @@ export function getManifestObjectKey(): string {
   return raw || DEFAULT_MANIFEST_OBJECT_KEY;
 }
 
-/** 合并上传写入的根结构；兼容部分导出为「纯数组」或嵌套在 data 下的写法 */
+/**
+ * 合并上传写入的根结构；兼容部分导出为「纯数组」或嵌套在 data 下的写法。
+ */
 export type AlbumManifestPayload = {
   schemaVersion: number;
   generatedAt?: string;
   assets: unknown[];
+  /**
+   * 顶层其它字段的原样保留（`assetsBasePath`，或将来由外部工具写入的任何键）。
+   *
+   * 为什么必须留着：合并写回是「读整份 → 改 assets → 写回整份」，
+   * 若归一化只挑出 schemaVersion/generatedAt/assets，那么每次上传都会
+   * 静默削掉其余顶层字段（曾经真实削掉过 `assetsBasePath`）。
+   */
+  extra: Record<string, unknown>;
 };
+
+const KNOWN_TOP_LEVEL_KEYS = new Set(["schemaVersion", "generatedAt", "assets"]);
+
+function collectExtraTopLevel(o: Record<string, unknown>): Record<string, unknown> {
+  const extra: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (!KNOWN_TOP_LEVEL_KEYS.has(k)) extra[k] = v;
+  }
+  return extra;
+}
+
+function toSchemaVersion(sv: unknown): number {
+  const n = typeof sv === "number" ? sv : Number(sv);
+  return Number.isFinite(n) ? n : 1;
+}
 
 export function normalizeAlbumManifestPayload(raw: unknown): AlbumManifestPayload {
   if (raw === null || raw === undefined) {
     throw new Error("清单响应为空");
   }
   if (Array.isArray(raw)) {
-    return { schemaVersion: 1, assets: raw };
+    return { schemaVersion: 1, assets: raw, extra: {} };
   }
   if (typeof raw !== "object") {
     throw new Error("清单 JSON 根节点须为对象或数组");
   }
   const o = raw as Record<string, unknown>;
   if (Array.isArray(o.assets)) {
-    const sv = o.schemaVersion;
-    const schemaVersion =
-      typeof sv === "number" ? sv : Number.isFinite(Number(sv)) ? Number(sv) : 1;
     return {
-      schemaVersion: Number.isFinite(schemaVersion) ? schemaVersion : 1,
+      schemaVersion: toSchemaVersion(o.schemaVersion),
       generatedAt: typeof o.generatedAt === "string" ? o.generatedAt : undefined,
       assets: o.assets,
+      extra: collectExtraTopLevel(o),
     };
   }
   const inner = o.data;
   if (inner && typeof inner === "object") {
     const d = inner as Record<string, unknown>;
     if (Array.isArray(d.assets)) {
-      const sv = d.schemaVersion;
-      const schemaVersion =
-        typeof sv === "number" ? sv : Number.isFinite(Number(sv)) ? Number(sv) : 1;
       return {
-        schemaVersion: Number.isFinite(schemaVersion) ? schemaVersion : 1,
+        schemaVersion: toSchemaVersion(d.schemaVersion),
         generatedAt: typeof d.generatedAt === "string" ? d.generatedAt : undefined,
         assets: d.assets,
+        // 嵌套在 data 下时，外层的额外字段同样保留（两者合并，内层优先）
+        extra: { ...collectExtraTopLevel(o), ...collectExtraTopLevel(d) },
       };
     }
   }
   throw new Error(
     "清单缺少 assets 数组。请确认 OSS 上对象为相册合并后的 JSON（含 assets），对象键与 VITE_ALBUM_MANIFEST_FILE / 上传路径一致。",
   );
+}
+
+export type MergedManifestResult = {
+  /** 可直接 JSON.stringify 写回 OSS 的完整顶层对象 */
+  doc: Record<string, unknown>;
+  /** 合并前已有条目数 */
+  previousCount: number;
+  /** 合并后总条目数 */
+  mergedCount: number;
+};
+
+/**
+ * 把新条目按 assetId 合并进现有清单 —— **纯函数**，因此可以被测试直接调用。
+ *
+ * 之前这段逻辑内联在 AlbumAdmin 组件里，无法在不渲染 React 的前提下执行，
+ * 于是「清单合并」这一最危险的操作长期没有任何自动化覆盖。
+ *
+ * @param existing 现有清单读取结果；`missing` 表示对象不存在（首次上传），按空清单处理
+ * @param newAssets 本次新增条目（调用方须保证其密文已成功写入 OSS）
+ * @param generatedAt 写回时间戳（由调用方注入，保证可测）
+ */
+export function buildMergedManifest(
+  existing: ExistingManifestForMerge,
+  newAssets: Record<string, unknown>[],
+  generatedAt: string,
+): MergedManifestResult {
+  const payload = existing.status === "ok" ? existing.payload : null;
+  const extra = payload ? payload.extra : {};
+
+  const byId = new Map<string, unknown>();
+  for (const a of payload?.assets ?? []) {
+    const id = (a as { assetId?: unknown } | null)?.assetId;
+    if (typeof id === "string") byId.set(id, a);
+  }
+  const previousCount = byId.size;
+  for (const a of newAssets) {
+    const id = (a as { assetId?: unknown }).assetId;
+    if (typeof id === "string") byId.set(id, a);
+  }
+
+  const assetsBasePath =
+    typeof extra.assetsBasePath === "string" ? (extra.assetsBasePath as string) : "/albums/";
+
+  const doc: Record<string, unknown> = {
+    ...extra,
+    schemaVersion: payload?.schemaVersion ?? 1,
+    generatedAt,
+    assetsBasePath,
+    assets: [...byId.values()],
+  };
+
+  return { doc, previousCount, mergedCount: byId.size };
 }
 
 function parseManifestJsonText(text: string, requestLabel: string): unknown {
