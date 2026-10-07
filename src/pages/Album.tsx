@@ -1,6 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { hasAlbumRouteAccess, STORAGE_GUEST_NICKNAME_KEY } from "@/lib/authGate";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, Navigate } from "react-router-dom";
 import { base64ToBytes, buildAadJson, importAesGcmKey } from "@/lib/albumCrypto";
 import { fetchAlbumManifestOrThrow } from "@/lib/albumManifestFetch";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
@@ -359,7 +358,6 @@ function useAssetImageUrl(
       .catch((e) => {
         if (cancelled) return;
         // 不打断 UI，保底用 fallback（若存在）
-        // eslint-disable-next-line no-console
         console.warn("[album] fetchSignedUrl/fetch blob failed:", e);
         setUrl(fallback);
       });
@@ -386,32 +384,11 @@ function useAssetImageUrl(
 }
 
 export default function Album() {
-  const navigate = useNavigate();
   const keySession = useSessionAuthStore((s) => s.keySession);
-  const [routeReady, setRouteReady] = useState(false);
-  const [guestNickname, setGuestNickname] = useState("");
   const [mode, setMode] = useState<AlbumViewMode>("time");
   const [manifest, setManifest] = useState<AlbumManifest | null>(null);
   const [resolvedMetaById, setResolvedMetaById] = useState<Record<string, AssetResolvedMetadata>>({});
   const [error, setError] = useState<string | null>(null);
-
-  const displayName = useMemo(() => {
-    if (keySession?.username) return keySession.username;
-    const g = guestNickname.trim();
-    return g ? `访客 · ${g}` : null;
-  }, [keySession?.username, guestNickname]);
-
-  useLayoutEffect(() => {
-    if (hasAlbumRouteAccess()) {
-      setRouteReady(true);
-      return;
-    }
-    navigate({ pathname: "/", search: "?login=1" }, { replace: true });
-  }, [navigate]);
-
-  useEffect(() => {
-    setGuestNickname(window.localStorage.getItem(STORAGE_GUEST_NICKNAME_KEY) ?? "");
-  }, []);
 
   // lightbox
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -438,6 +415,8 @@ export default function Album() {
       })
       .catch((e: unknown) => {
         if (cancelled) return;
+        // 界面只给普通访客看得懂的话，具体原因留在控制台便于排查
+        console.warn("[album] 加载相册清单失败:", e);
         setError(e instanceof Error ? e.message : String(e));
       });
     return () => {
@@ -613,12 +592,11 @@ export default function Album() {
     }
   }
 
-  if (!routeReady) {
-    return (
-      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 text-sm text-white/70">
-        正在校验访问…
-      </div>
-    );
+  // 准入的唯一依据：真的持有密钥会话。
+  // 旧实现用一个独立的 sessionStorage 标记判断，会出现「标记还在、密钥已丢」的情况
+  // （刷新页面后就是如此）→ 相册渲染出来却一张都解不开，而且不会回到登录页。
+  if (!keySession) {
+    return <Navigate to="/" replace state={{ needKey: true }} />;
   }
 
   return (
@@ -635,9 +613,7 @@ export default function Album() {
           </Link>
           <div className="min-w-0">
             <div className="text-sm font-extrabold tracking-wide text-white/90">相册</div>
-            {displayName ? (
-              <div className="truncate text-[11px] font-bold text-white/55">{displayName}</div>
-            ) : null}
+            <div className="truncate text-[11px] font-bold text-white/55">{keySession.username}</div>
           </div>
           {keySession?.isAdmin ? (
             <Link
@@ -676,17 +652,12 @@ export default function Album() {
       <main ref={scrollRef} className="relative z-10 flex-1 overflow-auto px-4 pb-6">
         <div className="mx-auto w-full max-w-6xl">
           {error ? (
-            <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-950/30 p-4 text-sm text-red-100">
-              {error}
-              <div className="mt-2 text-xs text-red-200/80">
-                清单默认与图片相同经函数计算换取临时 URL（对象键默认{" "}
-                <code className="rounded bg-black/30 px-1 py-0.5">albums/manifest.json</code>
-                ，可用 <code className="rounded bg-black/30 px-1 py-0.5">VITE_ALBUM_MANIFEST_FILE</code>
-                覆盖）。若需改为直链，请设置有效的完整 HTTPS{" "}
-                <code className="rounded bg-black/30 px-1 py-0.5">VITE_ALBUM_MANIFEST_URL</code>
-                （勿填单独一个 <code className="rounded bg-black/30 px-1 py-0.5">/</code>
-                ）；仅在不走签名服务时才使用该变量。
-              </div>
+            <div
+              className="mt-4 rounded-2xl border border-red-400/30 bg-red-950/30 p-4 text-sm text-red-100"
+              title={error}
+            >
+              相册暂时打不开，请稍后再试。
+              <div className="mt-1 text-xs text-red-200/70">如果一直这样，请联系站长。</div>
             </div>
           ) : null}
 
@@ -945,100 +916,20 @@ export default function Album() {
             {isInfoOpen ? (
               <div className="mb-3 rounded-2xl border border-white/10 bg-white/5 p-3 text-xs text-white/80">
                 <div className="flex flex-wrap gap-x-6 gap-y-2">
-                  <button
-                    type="button"
-                    className="text-left hover:text-white"
-                    title="点击复制"
-                    onClick={() => void copyText(active.assetId, "assetId")}
-                  >
-                    <span className="text-white/60">assetId：</span>
-                    <span className="font-extrabold">{active.assetId}</span>
-                  </button>
-                  {active.file ? (
-                    <button
-                      type="button"
-                      className="text-left hover:text-white"
-                      title="点击复制"
-                      onClick={() => void copyText(active.file ?? "", "file")}
-                    >
-                      <span className="text-white/60">file：</span>
-                      <span className="font-extrabold">{active.file}</span>
-                    </button>
-                  ) : null}
-                  {active.cipherFile ? (
-                    <button
-                      type="button"
-                      className="text-left hover:text-white"
-                      title="点击复制"
-                      onClick={() => void copyText(active.cipherFile ?? "", "cipherFile")}
-                    >
-                      <span className="text-white/60">cipherFile：</span>
-                      <span className="font-extrabold">{active.cipherFile}</span>
-                    </button>
-                  ) : null}
-                  {active.zoneId ? (
-                    <button
-                      type="button"
-                      className="text-left hover:text-white"
-                      title="点击复制"
-                      onClick={() => void copyText(active.zoneId ?? "", "zoneId")}
-                    >
-                      <span className="text-white/60">zoneId：</span>
-                      <span className="font-extrabold">{active.zoneId}</span>
-                    </button>
-                  ) : null}
-                  {active.file ? (
-                    <button
-                      type="button"
-                      className="text-left hover:text-white"
-                      title="点击获取并复制（短期有效）"
-                      onClick={() => {
-                        const file = active.file?.trim();
-                        if (!file) return setToast("无 file 可获取链接");
-                        void fetchSignedUrlForOssObject(file)
-                          .then((url) => {
-                            if (!url) return setToast("获取链接失败");
-                            return copyText(url, "临时链接");
-                          })
-                          .catch(() => setToast("获取链接失败"));
-                      }}
-                    >
-                      <span className="text-white/60">临时链接：</span>
-                      <span className="font-extrabold">点击复制</span>
-                    </button>
-                  ) : null}
-                  {active.src ? (
-                    <button
-                      type="button"
-                      className="text-left hover:text-white"
-                      title="点击复制"
-                      onClick={() => void copyText(active.src ?? "", "src")}
-                    >
-                      <span className="text-white/60">src：</span>
-                      <span className="font-extrabold">{active.src}</span>
-                    </button>
-                  ) : null}
+                  <div>
+                    <span className="text-white/60">文件名：</span>
+                    <span className="font-extrabold break-all">{active.originalName ?? "未知"}</span>
+                  </div>
                   <div>
                     <span className="text-white/60">尺寸：</span>
                     <span className="font-extrabold">
                       {active.width && active.height ? `${active.width}×${active.height}` : "未知"}
                     </span>
                   </div>
-                  {active.mime ? (
-                    <div>
-                      <span className="text-white/60">mime：</span>
-                      <span className="font-extrabold">{active.mime}</span>
-                    </div>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="text-left hover:text-white"
-                    title="点击复制"
-                    onClick={() => void copyText(active.takenAt ?? "", "takenAt")}
-                  >
-                    <span className="text-white/60">takenAt：</span>
+                  <div>
+                    <span className="text-white/60">拍摄时间：</span>
                     <span className="font-extrabold">{active.takenAt ?? "未知"}</span>
-                  </button>
+                  </div>
                 </div>
               </div>
             ) : null}

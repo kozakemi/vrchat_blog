@@ -63,13 +63,38 @@ check("控制字符被拒", validateObjectKey("albums/a\u0000b", ["albums/"]) !=
 check("超长被拒", validateObjectKey(`albums/${"a".repeat(600)}`, ["albums/"]) !== null);
 
 console.log("\n【2】签名与 ali-oss 逐字节比对");
-const fixed = Date.now();
-const realNow = Date.now;
-Date.now = () => fixed;
-try {
-  const objectKey = "albums/assets/probe.bin";
-  const contentType = "application/octet-stream";
-  const minePut = signOssUrl(cfg, { objectKey, method: "PUT", contentType, expiresSec: 900 });
+/**
+ * 逐字节比对的前提是两边算出同一个 Expires。
+ * ali-oss 用**真实时钟**决定 Expires，而这里还要动态导入它（耗时可达数百毫秒），
+ * 于是「先取 fixed、再调 ali」之间极易跨过整秒 → Expires 差 1 → 签名必然不等。
+ * 早期版本只冻结 Date.now，结果本测试在 19/21 与 21/21 之间随机跳（实测约五成）。
+ *
+ * 现在的做法：先用真实时钟问 ali-oss 要一个 Expires，再把时钟钉到
+ * `(它的 Expires - 900)` 秒，使自研签名器算出**完全相同**的 Expires。
+ * 这样不依赖任何一方读的是哪个时钟，比对结果是确定性的。
+ */
+function withFrozenDate(ms, fn) {
+  const Real = Date;
+  class FrozenDate extends Real {
+    constructor(...args) {
+      if (args.length === 0) super(ms);
+      else super(...args);
+    }
+    static now() {
+      return ms;
+    }
+  }
+  globalThis.Date = FrozenDate;
+  try {
+    return fn();
+  } finally {
+    globalThis.Date = Real;
+  }
+}
+
+const objectKey = "albums/assets/probe.bin";
+const contentType = "application/octet-stream";
+{
   const OSS = (await import("ali-oss")).default;
   const client = new OSS({
     region: "oss-cn-beijing",
@@ -78,20 +103,41 @@ try {
     bucket: cfg.bucket,
     secure: true,
   });
+
+  const sig = (u) => decodeURIComponent(new URL(u).searchParams.get("Signature") ?? "");
+  const exp = (u) => new URL(u).searchParams.get("Expires");
+
   const theoPut = client.signatureUrl(objectKey, {
     method: "PUT",
     expires: 900,
     "Content-Type": contentType,
   });
-  const sig = (u) => decodeURIComponent(new URL(u).searchParams.get("Signature") ?? "");
-  check("PUT Signature 一致", sig(minePut.signedUrl) === sig(theoPut));
+  const aliPutExpires = Number(exp(theoPut));
+  const minePut = withFrozenDate((aliPutExpires - 900) * 1000, () =>
+    signOssUrl(cfg, { objectKey, method: "PUT", contentType, expiresSec: 900 }),
+  );
+
+  const theoGet = client.signatureUrl(objectKey, { expires: 900 });
+  const aliGetExpires = Number(exp(theoGet));
+  const mineGet = withFrozenDate((aliGetExpires - 900) * 1000, () =>
+    signOssUrl(cfg, { objectKey, method: "GET", expiresSec: 900 }),
+  );
+
+  check(
+    "PUT Expires 与 ali-oss 一致",
+    exp(minePut.signedUrl) === exp(theoPut),
+    `${exp(minePut.signedUrl)}/${exp(theoPut)}`,
+  );
+  check(
+    "PUT Signature 一致",
+    sig(minePut.signedUrl) === sig(theoPut),
+    `sig=${sig(minePut.signedUrl).slice(0, 12)}/${sig(theoPut).slice(0, 12)}`,
+  );
   check(
     "GET Signature 一致",
-    sig(signOssUrl(cfg, { objectKey, method: "GET", expiresSec: 900 }).signedUrl) ===
-      sig(client.signatureUrl(objectKey, { expires: 900 })),
+    sig(mineGet.signedUrl) === sig(theoGet),
+    `sig=${sig(mineGet.signedUrl).slice(0, 12)}/${sig(theoGet).slice(0, 12)}`,
   );
-} finally {
-  Date.now = realNow;
 }
 
 console.log("\n【3】真实 GET 打桶");

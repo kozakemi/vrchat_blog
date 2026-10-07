@@ -9,6 +9,11 @@ const server = await createServer({
   server: { middlewareMode: true, hmr: false, ws: false },
   appType: "custom",
   logLevel: "error",
+  // 本测试只用 ssrLoadModule 跑源码，不需要预打包依赖。
+  // 关掉依赖扫描可避免它在 server 关闭后仍回调，从而打出
+  // “The server is being restarted or closed … [plugin vite:dep-scan]” 的红色 ERROR
+  // ——那只是竞态噪音，测试其实是通过的，但极易让人误判为失败。
+  optimizeDeps: { noDiscovery: true, include: [] },
 });
 const originalFetch = globalThis.fetch;
 const config = {

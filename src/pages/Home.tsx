@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import i18n, { persistLanguage } from "@/i18n";
 import {
-  SESSION_ALBUM_GRANTED_KEY,
-  STORAGE_AUTH_MODE_KEY,
-  STORAGE_GUEST_NICKNAME_KEY,
-} from "@/lib/authGate";
-import { isAdminKeyFile, parseKeyFileJson, validateKeyFile } from "@/lib/keyFile";
+  isAdminKeyFile,
+  keyFileToDownloadJson,
+  parseKeyFileJson,
+  validateKeyFile,
+  type KeyFileV1,
+} from "@/lib/keyFile";
+import { PUBLIC_ZONES, canSelfRegister } from "@/lib/publicZones";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 const LANG_CYCLE = ["zh", "ja", "en"] as const;
@@ -26,559 +28,289 @@ function getLanguageLabel(language: string) {
   return "English";
 }
 
-type LoginMode = "key" | "guest";
-type AuthState =
-  | { status: "anonymous" }
-  | { status: "authed"; mode: "key" }
-  | { status: "authed"; mode: "guest"; nickname: string };
+type Tab = "login" | "register";
 
-type LoginEffectState =
-  | {
-      mode: LoginMode;
-      accountLabel: string;
-    }
-  | null;
-
-type JoinStatus = "connecting" | "joining";
-
-function loadAuthState(): AuthState {
-  const mode = window.localStorage.getItem(STORAGE_AUTH_MODE_KEY);
-  if (mode === "guest") {
-    const nickname = window.localStorage.getItem(STORAGE_GUEST_NICKNAME_KEY) ?? "";
-    if (nickname.trim()) return { status: "authed", mode: "guest", nickname };
-  }
-  return { status: "anonymous" };
-}
-
-function persistGuest(nickname: string) {
-  window.localStorage.setItem(STORAGE_AUTH_MODE_KEY, "guest");
-  window.localStorage.setItem(STORAGE_GUEST_NICKNAME_KEY, nickname);
-}
-
-function clearAuthPersistence() {
-  window.localStorage.removeItem(STORAGE_AUTH_MODE_KEY);
-  window.localStorage.removeItem(STORAGE_GUEST_NICKNAME_KEY);
-}
-
+/**
+ * 登录页（本站唯一入口）。
+ *
+ * - 登录：导入密钥文件
+ * - 注册：按 src/config/public-zones.json 里的「公开区」现场生成并下载密钥文件
+ *
+ * 登录态存放在 localStorage（见 store/sessionAuthStore），刷新与重开浏览器都不会掉。
+ * 相册页/管理页只认这个会话，不再有独立的准入标记。
+ */
 export default function Home() {
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [view, setView] = useState<"home" | "login" | "authed" | "joining">("home");
-  const [auth, setAuth] = useState<AuthState>(() => loadAuthState());
-  const [loginMode, setLoginMode] = useState<LoginMode>("key");
+  const location = useLocation();
+  const keySession = useSessionAuthStore((s) => s.keySession);
+  const setKeySession = useSessionAuthStore((s) => s.setKeySession);
+
+  const [tab, setTab] = useState<Tab>("login");
   const [keyFile, setKeyFile] = useState<File | null>(null);
-  const [guestNickname, setGuestNickname] = useState(() => {
-    const saved = window.localStorage.getItem(STORAGE_GUEST_NICKNAME_KEY);
-    return saved ?? "";
-  });
+  const [nickname, setNickname] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [keyFileError, setKeyFileError] = useState<string | null>(null);
-  const [loginEffect, setLoginEffect] = useState<LoginEffectState>(null);
-  const [loginProgress, setLoginProgress] = useState(0);
-  const [joinStatus, setJoinStatus] = useState<JoinStatus>("connecting");
-  const sceneRef = useRef<HTMLDivElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
   const keyInputRef = useRef<HTMLInputElement | null>(null);
 
-  const languageLabel = useMemo(() => getLanguageLabel(i18n.language), [i18n.language]);
-
+  /** 从相册页被请回登录页时，用一句人话说明原因，并清掉该标记避免刷新后重复出现 */
+  const needKey = Boolean((location.state as { needKey?: boolean } | null)?.needKey);
   useEffect(() => {
-    if (searchParams.get("login") !== "1") return;
-    setView("login");
-    setLoginMode("key");
-    setKeyFileError(null);
-    const next = new URLSearchParams(searchParams);
-    next.delete("login");
-    setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams]);
-
-  useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const scene = sceneRef.current;
-    const panel = panelRef.current;
-    if (!scene || !panel) return;
-
-    const baseTiltX = 10;
-    const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-    let targetX = baseTiltX;
-    let targetY = 0;
-    let currentX = baseTiltX;
-    let currentY = 0;
-    let bgTargetX = 0;
-    let bgTargetY = 0;
-    let bgCurrentX = 0;
-    let bgCurrentY = 0;
-    let rafId = 0;
-
-    const apply = () => {
-      currentX += (targetX - currentX) * 0.12;
-      currentY += (targetY - currentY) * 0.12;
-      panel.style.setProperty("--panel-tilt-x", `${currentX.toFixed(3)}deg`);
-      panel.style.setProperty("--panel-tilt-y", `${currentY.toFixed(3)}deg`);
-
-      bgCurrentX += (bgTargetX - bgCurrentX) * 0.1;
-      bgCurrentY += (bgTargetY - bgCurrentY) * 0.1;
-      document.documentElement.style.setProperty("--bg-parallax-x", `${bgCurrentX.toFixed(2)}px`);
-      document.documentElement.style.setProperty("--bg-parallax-y", `${bgCurrentY.toFixed(2)}px`);
-      rafId = window.requestAnimationFrame(apply);
-    };
-
-    rafId = window.requestAnimationFrame(apply);
-
-    const onPointerMove = (event: PointerEvent) => {
-      const rect = scene.getBoundingClientRect();
-      const nx = (event.clientX - rect.left) / rect.width - 0.5;
-      const ny = (event.clientY - rect.top) / rect.height - 0.5;
-
-      targetY = clamp(nx * 6, -6, 6);
-      targetX = clamp(baseTiltX + ny * -4, baseTiltX - 5, baseTiltX + 5);
-
-      bgTargetX = clamp(nx * -18, -18, 18);
-      bgTargetY = clamp(ny * -12, -12, 12);
-    };
-
-    const onPointerLeave = () => {
-      targetX = baseTiltX;
-      targetY = 0;
-      bgTargetX = 0;
-      bgTargetY = 0;
-    };
-
-    scene.addEventListener("pointermove", onPointerMove);
-    scene.addEventListener("pointerleave", onPointerLeave);
-
-    return () => {
-      scene.removeEventListener("pointermove", onPointerMove);
-      scene.removeEventListener("pointerleave", onPointerLeave);
-      window.cancelAnimationFrame(rafId);
-      document.documentElement.style.removeProperty("--bg-parallax-x");
-      document.documentElement.style.removeProperty("--bg-parallax-y");
-    };
-  }, []);
+    if (!needKey) return;
+    navigate("/", { replace: true, state: null });
+  }, [needKey, navigate]);
 
   useEffect(() => {
     if (!isHelpOpen) return;
-
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setIsHelpOpen(false);
     };
-
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isHelpOpen]);
 
-  useEffect(() => {
-    if (!loginEffect) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setLoginProgress(1);
+  function downloadTextFile(filename: string, text: string) {
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleKeyLogin() {
+    if (!keyFile) return;
+    let text: string;
+    try {
+      text = await keyFile.text();
+    } catch {
+      setError(t("errKeyFileRead"));
       return;
     }
 
-    let rafId = 0;
-    const startAt = performance.now();
-    const durationMs = 2400;
-
-    const tick = (now: number) => {
-      const t01 = Math.min(1, (now - startAt) / durationMs);
-      const eased = 1 - Math.pow(1 - t01, 3);
-      setLoginProgress(eased);
-      if (t01 < 1) rafId = window.requestAnimationFrame(tick);
-    };
-
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [loginEffect]);
-
-  useEffect(() => {
-    if (!loginEffect) return;
-    if (loginProgress < 1) return;
-
-    if (loginEffect.mode === "key") {
-      setAuth({ status: "authed", mode: "key" });
-      clearAuthPersistence();
-    } else {
-      const nickname = loginEffect.accountLabel;
-      persistGuest(nickname);
-      setAuth({ status: "authed", mode: "guest", nickname });
+    let data: KeyFileV1;
+    try {
+      data = parseKeyFileJson(text);
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : "";
+      setError(raw.includes("schemaVersion") ? t("errKeyFileVersion") : t("errKeyFileNotJson"));
+      return;
     }
 
-    setJoinStatus("connecting");
-    setView("joining");
-    setLoginEffect(null);
-  }, [loginEffect, loginProgress]);
+    if (validateKeyFile(data)) {
+      setError(t("errKeyFileInvalid"));
+      return;
+    }
 
-  useEffect(() => {
-    if (!loginEffect) return;
+    setError(null);
+    setNotice(null);
+    setKeySession({
+      username: data.username.trim(),
+      zones: data.zones,
+      roles: data.roles ?? [],
+      isAdmin: isAdminKeyFile(data),
+    });
+    navigate("/album");
+  }
 
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setLoginEffect(null);
-      setLoginProgress(0);
+  function handleRegister() {
+    const name = nickname.trim();
+    if (!name) return;
+    if (!canSelfRegister()) {
+      setError(t("errRegisterUnavailable"));
+      return;
+    }
+
+    const data: KeyFileV1 = {
+      schemaVersion: 1,
+      username: name,
+      roles: [],
+      zones: PUBLIC_ZONES,
+      createdAt: new Date().toISOString(),
     };
+    if (validateKeyFile(data)) {
+      // 只有 public-zones.json 配错才会走到这里
+      setError(t("errRegisterConfig"));
+      return;
+    }
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [loginEffect]);
+    const filename = `key-${name.replace(/[^\w.-]+/g, "_") || "guest"}.json`;
+    downloadTextFile(filename, keyFileToDownloadJson(data));
+    setError(null);
+    setKeySession({ username: name, zones: data.zones, roles: [], isAdmin: false });
+    setNotice(t("registerNotice", { file: filename }));
+  }
 
-  useEffect(() => {
-    if (view !== "joining") return;
+  function handleLogout() {
+    setKeySession(null);
+    setKeyFile(null);
+    setNickname("");
+    setNotice(null);
+    setError(null);
+    setTab("login");
+  }
 
-    setJoinStatus("connecting");
-    const t1 = window.setTimeout(() => setJoinStatus("joining"), 1400);
-    const t2 = window.setTimeout(() => {
-      window.sessionStorage.setItem(SESSION_ALBUM_GRANTED_KEY, "1");
-      navigate("/album");
-    }, 2600);
+  const languageLabel = getLanguageLabel(i18nInstance.language);
+  const langSwitch = (
+    <button
+      className="lang-switch"
+      type="button"
+      onClick={() => {
+        const next = getNextLanguage(i18nInstance.language);
+        void i18n.changeLanguage(next);
+        persistLanguage(next);
+      }}
+    >
+      {languageLabel}
+    </button>
+  );
 
-    return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-    };
-  }, [navigate, view]);
-
-  if (view === "joining") {
+  // ---- 已登录：给一个明确的「进入相册」，并保留退出登录 ----
+  if (keySession) {
     return (
-      <div className="fullscreen">
-        <div className="fullscreen-content">
-          <div className="join-screen" role="status" aria-live="polite">
-            <div className="join-preview" aria-hidden="true" />
-            <div className="join-status">
-              <div className="join-status-text">
-                {joinStatus === "connecting" ? t("connecting") : t("joining")}
+      <div className="scene">
+        <div className="panel" role="region" aria-label={t("login")}>
+          <div className="panel-content">
+            <div className="login-card" role="group" aria-label={t("login")}>
+              <div className="login-card-header">{t("login")}</div>
+              <div className="login-card-body">
+                {notice ? <div className="login-hint login-hint-ok">{notice}</div> : null}
+                <div className="login-hint">
+                  {t("loggedInAs", { name: keySession.username })}
+                </div>
+                <div className="login-actions">
+                  <button
+                    className="login-action"
+                    type="button"
+                    onClick={() => navigate("/album")}
+                  >
+                    {t("enterAlbum")}
+                  </button>
+                  <button className="login-action" type="button" onClick={handleLogout}>
+                    {t("logout")}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+          {langSwitch}
         </div>
       </div>
     );
   }
 
+  // ---- 未登录：登录 / 注册 ----
   return (
-    <div className="scene" ref={sceneRef}>
-      <div className="panel" ref={panelRef} role="region" aria-label="Login panel">
-        {!loginEffect && view === "home" ? (
-          <>
-            <button className="btn-about" type="button">
-              {t("aboutUs")}
-            </button>
-
-            <div className="early-access" aria-hidden="true">
-              <div className="early-access-inner">Early Access</div>
-            </div>
-          </>
-        ) : null}
-
+    <div className="scene">
+      <div className="panel" role="region" aria-label={t("login")}>
         <div className="panel-content">
-          {loginEffect ? (
-            <div className="login-effect-backdrop" role="presentation">
-              <div
-                className="login-effect"
-                role="dialog"
-                aria-modal="true"
-                aria-label={t("loggingInTitle")}
-                style={{
-                  ["--progress" as never]: `${Math.round(loginProgress * 100)}`,
-                }}
-              >
-                <div className="login-effect-ring" aria-hidden="true" />
-                <div className="login-effect-inner">
-                  <div className="login-effect-corners">
-                    <span>0%</span>
-                    <span>100%</span>
-                  </div>
-                  <svg className="login-effect-wave" viewBox="0 0 240 44" aria-hidden="true">
-                    <path
-                      d="M0 22 C 16 10, 28 10, 44 22 S 72 34, 88 22 S 116 10, 132 22 S 160 34, 176 22 S 204 10, 220 22 S 232 34, 240 22"
-                      fill="none"
-                      stroke="rgba(255,255,255,0.72)"
-                      strokeWidth="3"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                  <div className="login-effect-title">{t("loggingInTitle")}</div>
-                  <div className="login-effect-subtitle">
-                    {loginEffect.mode === "key"
-                      ? t("loggingInWithKey", { account: loginEffect.accountLabel })
-                      : t("loggingInWithGuest", { account: loginEffect.accountLabel })}
-                  </div>
-                  <button
-                    className="login-effect-cancel"
-                    type="button"
-                    onClick={() => {
-                      setLoginEffect(null);
-                      setLoginProgress(0);
+          <div className="login-card" role="group" aria-label={t("login")}>
+            <div className="login-card-header">{t("login")}</div>
+            <div className="login-card-body">
+              <div className="login-mode-row" role="tablist" aria-label={t("login")}>
+                <button
+                  className={tab === "login" ? "login-mode login-mode-active" : "login-mode"}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === "login"}
+                  onClick={() => {
+                    setTab("login");
+                    setError(null);
+                  }}
+                >
+                  {t("keyLogin")}
+                </button>
+                <button
+                  className={tab === "register" ? "login-mode login-mode-active" : "login-mode"}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === "register"}
+                  onClick={() => {
+                    setTab("register");
+                    setError(null);
+                  }}
+                >
+                  {t("register")}
+                </button>
+              </div>
+
+              {needKey && !error ? (
+                <div className="login-hint login-hint-warn">{t("needKeyNotice")}</div>
+              ) : null}
+              {error ? <div className="login-hint login-hint-error">{error}</div> : null}
+
+              {tab === "login" ? (
+                <>
+                  <input
+                    ref={keyInputRef}
+                    className="login-file-input"
+                    type="file"
+                    accept=".json,application/json"
+                    aria-label={t("importKey")}
+                    onChange={(e) => {
+                      setKeyFile(e.currentTarget.files?.[0] ?? null);
+                      setError(null);
                     }}
+                  />
+                  <button
+                    className="login-file-button"
+                    type="button"
+                    onClick={() => keyInputRef.current?.click()}
                   >
-                    {t("cancel")}
+                    {t("importKey")}
                   </button>
-                </div>
+                  {keyFile ? (
+                    <div className="login-hint">
+                      {t("keySelected")}: {keyFile.name}
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <input
+                  className="login-input"
+                  type="text"
+                  placeholder={t("nicknamePlaceholder")}
+                  value={nickname}
+                  onChange={(e) => {
+                    setNickname(e.currentTarget.value);
+                    setError(null);
+                  }}
+                  maxLength={24}
+                  autoComplete="nickname"
+                  aria-label={t("nicknamePlaceholder")}
+                />
+              )}
+
+              <div className="login-actions">
+                <button
+                  className="login-action"
+                  type="button"
+                  disabled={tab === "login" ? !keyFile : !nickname.trim()}
+                  onClick={() => {
+                    if (tab === "login") void handleKeyLogin();
+                    else handleRegister();
+                  }}
+                >
+                  {tab === "login" ? t("enterAlbum") : t("generateKey")}
+                </button>
               </div>
             </div>
-          ) : (
-            <>
-              {(
-                <>
-                  <div className="welcome-text">{t("welcome")}</div>
-
-                  <div className="logo-bubble" aria-label="Those Days logo">
-                    <div className="logo-box">
-                      <span className="logo-those">THOSE</span>
-                      <div className="logo-days-wrap">
-                        <span className="logo-days">DAYS</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {view === "home" ? (
-                    <>
-                      <div className="login-label">Login with</div>
-
-                      <div className="btn-row">
-                        <a
-                          className="btn-login"
-                          href="https://www.kozakemi.top"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          {t("traveler")}
-                        </a>
-                        <button
-                          className="btn-login"
-                          type="button"
-                          onClick={() => {
-                            setView("login");
-                          }}
-                        >
-                          {t("vrcResident")}
-                        </button>
-                      </div>
-
-                      <div className="or-label">OR</div>
-
-                      <button className="btn-create" type="button" disabled>
-                        {t("createAccount")}
-                      </button>
-
-                    </>
-                  ) : view === "login" ? (
-                    <div className="login-card" role="group" aria-label="Login form">
-                      <div className="login-card-header">{t("login")}</div>
-                      <div className="login-card-body">
-                        <div className="login-mode-row" role="tablist" aria-label="Login mode">
-                          <button
-                            className={
-                              loginMode === "key" ? "login-mode login-mode-active" : "login-mode"
-                            }
-                            type="button"
-                            onClick={() => {
-                              setLoginMode("key");
-                              setKeyFileError(null);
-                            }}
-                            role="tab"
-                            aria-selected={loginMode === "key"}
-                          >
-                            {t("keyLogin")}
-                          </button>
-                          <button
-                            className={
-                              loginMode === "guest"
-                                ? "login-mode login-mode-active"
-                                : "login-mode"
-                            }
-                            type="button"
-                            onClick={() => {
-                              setLoginMode("guest");
-                              setKeyFileError(null);
-                              useSessionAuthStore.getState().setKeySession(null);
-                            }}
-                            role="tab"
-                            aria-selected={loginMode === "guest"}
-                          >
-                            {t("guestLogin")}
-                          </button>
-                        </div>
-
-                        {loginMode === "key" ? (
-                          <>
-                            <input
-                              ref={keyInputRef}
-                              className="login-file-input"
-                              type="file"
-                              onChange={(e) => {
-                                setKeyFile(e.currentTarget.files?.[0] ?? null);
-                                setKeyFileError(null);
-                              }}
-                            />
-                            <button
-                              className="login-file-button"
-                              type="button"
-                              onClick={() => keyInputRef.current?.click()}
-                            >
-                              {t("importKey")}
-                            </button>
-                            {keyFile ? (
-                              <div className="login-hint">
-                                {t("keySelected")}: {keyFile.name}
-                              </div>
-                            ) : null}
-                            {keyFileError ? (
-                              <div className="login-hint" style={{ color: "rgba(255,180,180,0.95)" }}>
-                                {keyFileError}
-                              </div>
-                            ) : null}
-                          </>
-                        ) : (
-                          <input
-                            className="login-input"
-                            type="text"
-                            placeholder={t("nicknamePlaceholder")}
-                            value={guestNickname}
-                            onChange={(e) => setGuestNickname(e.currentTarget.value)}
-                            maxLength={24}
-                            autoComplete="nickname"
-                          />
-                        )}
-
-                        <div className="login-actions">
-                          <button
-                            className="login-action"
-                            type="button"
-                            onClick={() => {
-                              setView("home");
-                              setKeyFile(null);
-                              setKeyFileError(null);
-                              setIsHelpOpen(false);
-                            }}
-                          >
-                            {t("back")}
-                          </button>
-                          <button
-                            className="login-action"
-                            type="button"
-                            disabled={loginMode === "key" ? !keyFile : !guestNickname.trim()}
-                            onClick={() => {
-                              if (loginMode === "key") {
-                                if (!keyFile) return;
-                                void (async () => {
-                                  try {
-                                    const text = await keyFile.text();
-                                    const data = parseKeyFileJson(text);
-                                    const err = validateKeyFile(data);
-                                    if (err) {
-                                      setKeyFileError(err);
-                                      return;
-                                    }
-                                    setKeyFileError(null);
-                                    useSessionAuthStore.getState().setKeySession({
-                                      username: data.username.trim(),
-                                      zones: data.zones,
-                                      roles: data.roles ?? [],
-                                      isAdmin: isAdminKeyFile(data),
-                                    });
-                                    setLoginProgress(0);
-                                    setLoginEffect({
-                                      mode: "key",
-                                      accountLabel: data.username.trim(),
-                                    });
-                                  } catch (e) {
-                                    setKeyFileError(
-                                      e instanceof Error ? e.message : "密钥文件无法解析",
-                                    );
-                                  }
-                                })();
-                                return;
-                              }
-
-                              useSessionAuthStore.getState().setKeySession(null);
-                              const nickname = guestNickname.trim();
-                              if (!nickname) return;
-                              setLoginProgress(0);
-                              setLoginEffect({ mode: "guest", accountLabel: nickname });
-                            }}
-                          >
-                            {t("done")}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="login-card" role="group" aria-label="Login status">
-                      <div className="login-card-header">{t("login")}</div>
-                      <div className="login-card-body">
-                        <div className="login-hint">
-                          {auth.status === "authed" && auth.mode === "key"
-                            ? t("loggedInAsKey")
-                            : null}
-                          {auth.status === "authed" && auth.mode === "guest" ? (
-                            <>
-                              {t("loggedInAsGuest")}: {auth.nickname}
-                            </>
-                          ) : null}
-                        </div>
-                        <div className="login-actions">
-                          <button
-                            className="login-action"
-                            type="button"
-                            onClick={() => {
-                              setView("home");
-                              setIsHelpOpen(false);
-                            }}
-                          >
-                            {t("back")}
-                          </button>
-                          <button
-                            className="login-action"
-                            type="button"
-                            onClick={() => {
-                              setAuth({ status: "anonymous" });
-                              clearAuthPersistence();
-                              window.sessionStorage.removeItem(SESSION_ALBUM_GRANTED_KEY);
-                              useSessionAuthStore.getState().setKeySession(null);
-                              setKeyFile(null);
-                              setView("home");
-                            }}
-                          >
-                            {t("logout")}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
+          </div>
         </div>
 
-        {view === "login" && !loginEffect ? (
-          <button
-            className="help-switch"
-            type="button"
-            aria-label="Help"
-            onClick={() => setIsHelpOpen(true)}
-          >
-            ?
-          </button>
-        ) : null}
-
-        {!loginEffect ? (
-          <button
-            className="lang-switch"
-            type="button"
-            onClick={() => {
-              const next = getNextLanguage(i18n.language);
-              void i18n.changeLanguage(next);
-              persistLanguage(next);
-            }}
-          >
-            {languageLabel}
-          </button>
-        ) : null}
+        <button
+          className="help-switch"
+          type="button"
+          aria-label={t("loginHelpTitle")}
+          onClick={() => setIsHelpOpen(true)}
+        >
+          ?
+        </button>
+        {langSwitch}
       </div>
 
-      {view === "login" && isHelpOpen
+      {isHelpOpen
         ? createPortal(
             <div
               className="help-modal-backdrop"
@@ -595,7 +327,7 @@ export default function Home() {
                 <button
                   className="help-modal-close"
                   type="button"
-                  aria-label="Close"
+                  aria-label={t("close")}
                   onClick={() => setIsHelpOpen(false)}
                 >
                   ×

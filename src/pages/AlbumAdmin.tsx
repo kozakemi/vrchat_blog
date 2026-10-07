@@ -1,16 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, Navigate } from "react-router-dom";
 import JSZip from "jszip";
 import { encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
-import { hasAlbumRouteAccess } from "@/lib/authGate";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
 import {
   buildMergedManifest,
   fetchExistingManifestForMerge,
   getManifestObjectKey,
 } from "@/lib/albumManifestFetch";
-import { getAlbumManifestUrl } from "@/lib/manifestUrl";
-import { getOssSignEndpoint } from "@/lib/ossSignFetch";
 import {
   clearOssConfigSession,
   getDefaultOssJsonTemplate,
@@ -129,11 +126,9 @@ async function encryptQueueItem(item: QueueItem, zone: KeyFileZoneV1) {
 }
 
 export default function AlbumAdmin() {
-  const navigate = useNavigate();
   const keySession = useSessionAuthStore((s) => s.keySession);
   const setKeySession = useSessionAuthStore((s) => s.setKeySession);
 
-  const [routeReady, setRouteReady] = useState(false);
   const [tab, setTab] = useState<AdminTab>("encrypt");
 
   const [newZoneId, setNewZoneId] = useState("");
@@ -164,28 +159,16 @@ export default function AlbumAdmin() {
 
   const zoneOptions = useMemo(() => keySession?.zones ?? [], [keySession?.zones]);
 
-  useLayoutEffect(() => {
-    if (!hasAlbumRouteAccess()) {
-      navigate({ pathname: "/", search: "?login=1" }, { replace: true });
-      return;
-    }
-    if (!keySession?.isAdmin) {
-      navigate("/album", { replace: true });
-      return;
-    }
-    setRouteReady(true);
-  }, [navigate, keySession?.isAdmin]);
-
   useEffect(() => {
     if (!defaultZoneId && zoneOptions.length) setDefaultZoneId(zoneOptions[0].zoneId);
   }, [defaultZoneId, zoneOptions]);
 
-  if (!routeReady || !keySession?.isAdmin) {
-    return (
-      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 text-sm text-white/75">
-        校验权限…
-      </div>
-    );
+  // 与相册页同一套准入规则：没有密钥会话就回登录页，非管理员回相册页
+  if (!keySession) {
+    return <Navigate to="/" replace state={{ needKey: true }} />;
+  }
+  if (!keySession.isAdmin) {
+    return <Navigate to="/album" replace />;
   }
 
   function appendQueue(files: File[]) {
@@ -292,7 +275,7 @@ export default function AlbumAdmin() {
 
     const after = await fetchExistingManifestForMerge();
     if (after.status !== "ok") {
-      throw new Error(`清单写入后回读失败（对象键 ${objectKey}），无法确认是否落盘，请到 OSS 控制台核对`);
+      throw new Error(`相册目录保存后读不回来（${objectKey}），无法确认是否成功，请到 OSS 控制台确认`);
     }
     const afterIds = new Set(
       after.payload.assets
@@ -305,7 +288,7 @@ export default function AlbumAdmin() {
     const lost = expectedIds.filter((id) => !afterIds.has(id));
     if (lost.length) {
       throw new Error(
-        `清单回读校验不通过：${lost.length} 条记录不在写入结果中（如 ${lost.slice(0, 3).join(", ")}），可能存在并发写入或被覆盖`,
+        `保存后核对不通过：有 ${lost.length} 条没有出现在结果里（如 ${lost.slice(0, 3).join(", ")}），可能被另一次上传覆盖`,
       );
     }
     // 顶层字段也必须能回读出来（防止归一化把 assetsBasePath 之类的字段吃掉）
@@ -316,7 +299,7 @@ export default function AlbumAdmin() {
     );
     if (lostTopLevel.length) {
       throw new Error(
-        `清单回读校验不通过：写回的顶层字段 ${lostTopLevel.join(", ")} 未出现在回读结果中`,
+        `保存后核对不通过：字段 ${lostTopLevel.join(", ")} 没有出现在结果里`,
       );
     }
     return { previousCount, mergedCount: afterIds.size };
@@ -369,7 +352,7 @@ export default function AlbumAdmin() {
         if (!newManifestAssets.length) {
           setQueue(failedItems);
           setLastMsg(
-            `全部 ${failures.length} 项失败，未写入清单（避免清单指向不存在的密文）。首个错误 —— ${failures[0]}`,
+            `${failures.length} 项都没能上传，相册没有任何改动。第一个失败原因：${failures[0]}`,
           );
           return;
         }
@@ -380,8 +363,7 @@ export default function AlbumAdmin() {
             ? `；另有 ${failures.length} 项失败，已保留在列表中可重试（首个：${failures[0]}）`
             : "";
           setLastMsg(
-            `清单已更新并通过回读校验：原有 ${result.previousCount} 条 + 本次 ${newManifestAssets.length} 条 = ${result.mergedCount} 条。` +
-              `密文位于 ${ASSETS_PREFIX}（浏览器内签名，未整包 ZIP）${warn}`,
+            `已保存：原有 ${result.previousCount} 张 + 本次 ${newManifestAssets.length} 张 = 共 ${result.mergedCount} 张。${warn}`,
           );
           setQueue(failedItems);
         } catch (e) {
@@ -394,8 +376,8 @@ export default function AlbumAdmin() {
           );
           setQueue(failedItems);
           setLastMsg(
-            `密文已上传 ${newManifestAssets.length} 个，但清单写入/校验失败：${e instanceof Error ? e.message : String(e)}。` +
-              `已下载 manifest-backup-*.json 作为兜底；请先排查签名服务与桶权限，确认清单状态后再重试，切勿盲目重复上传。`,
+            `${newManifestAssets.length} 张照片已上传，但相册目录保存失败：${e instanceof Error ? e.message : String(e)}。` +
+              `已下载 manifest-backup-*.json 作为备份；请先确认相册状态再重试，不要反复上传。`,
           );
         }
         return;
@@ -508,7 +490,7 @@ export default function AlbumAdmin() {
           <section className="space-y-4 rounded-2xl border border-amber-400/30 bg-amber-950/20 p-4">
             <div className="rounded-xl border border-cyan-400/35 bg-black/35 p-3">
               <div className="mb-2 text-[11px] font-extrabold text-cyan-100/95">
-                OSS 上传配置（点击「加密并上传到 OSS」前<strong className="text-cyan-50">必填</strong>）
+                OSS 上传配置（点「加密并上传到 OSS」前<strong className="text-cyan-50">必填</strong>）
               </div>
               <textarea
                 aria-label="OSS 上传配置 JSON"
@@ -563,7 +545,7 @@ export default function AlbumAdmin() {
                 </button>
               </div>
               <p className="mt-2 text-[10px] leading-relaxed text-rose-200/85">
-                AccessKey 仅保存在当前标签页的 sessionStorage，关闭标签即清除；任何人都能从开发者工具看到明文，切勿在公共环境使用。密钥勿提交 Git、勿发到聊天；泄露请到阿里云控制台轮换。
+                这段密钥只保存在当前标签页，关掉浏览器就清空。请务必：不要在公共电脑上使用、不要提交到 Git、不要发到聊天里；一旦泄露，请到阿里云控制台更换。
               </p>
               {ossUploadConfig ? (
                 <p className="mt-1 text-[10px] text-emerald-200/90">
@@ -575,13 +557,10 @@ export default function AlbumAdmin() {
             </div>
 
             <p className="text-[11px] leading-relaxed text-white/55">
-              支持按后缀筛选（jpg / png / webp / gif / mp4 / webm）。选择文件夹时会递归包含子目录中的匹配文件。每个文件可单独指定目标
-              Zone。<span className="text-amber-200/90">大批量优先使用「加密并上传到 OSS」</span>
-              （不会在浏览器里整包 ZIP，避免内存不足）；「仅打包下载」会按约 {ZIP_BATCH_MAX_FILES} 张/
-              {Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024))}MB 原图体积分卷多个 ZIP。上传使用上方 JSON 在浏览器内生成 OSS 预签名
-              PUT（<span className="text-rose-200/90">当前函数计算仅提供 GET 签名，PUT 必须依赖上方 OSS 配置</span>）；
-              清单合并至 <code className="rounded bg-black/40 px-1">{getManifestObjectKey()}</code>
-              （与相册读取清单的对象键一致），密文放到 <code className="rounded bg-black/40 px-1">{ASSETS_PREFIX}</code>。
+              只挑图片和视频（jpg / png / webp / gif / mp4 / webm）。选文件夹时会连着子文件夹一起找。每个文件都能单独选放进哪个
+              Zone。<span className="text-amber-200/90">照片多的时候请用「加密并上传到 OSS」</span>
+              （直接传，不占内存）；「仅打包下载」会按约 {ZIP_BATCH_MAX_FILES} 张 或{" "}
+              {Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024))}MB 分成几个 ZIP 下载。上传前需要先在上面填好 OSS 配置。
             </p>
 
             <div className="flex flex-wrap gap-3">
@@ -758,16 +737,7 @@ export default function AlbumAdmin() {
           <div className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-[11px] text-amber-100/95">{lastMsg}</div>
         ) : null}
 
-        <p className="text-[10px] text-white/40">
-          {getOssSignEndpoint() ? (
-            <>
-              合并前拉取清单：与相册相同经函数计算，对象键{" "}
-              <code className="text-white/55">{getManifestObjectKey()}</code>
-            </>
-          ) : (
-            <>合并前直链：{getAlbumManifestUrl()}</>
-          )}
-        </p>
+        <p className="text-[10px] text-white/40">保存前会先读取现有相册并核对，确保不会覆盖已有照片。</p>
       </div>
     </div>
   );
