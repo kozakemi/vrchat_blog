@@ -16,7 +16,7 @@ import {
   saveOssConfigToSession,
   SESSION_OSS_UPLOAD_JSON_KEY,
 } from "@/lib/ossUploadConfig";
-import { putObjectWithSignedUrl, resolvePutSignedUrl } from "@/lib/ossUpload";
+import { putObjectWithSignedUrl, probeUploadAccess, resolvePutSignedUrl } from "@/lib/ossUpload";
 import type { OssUploadConfig } from "@/lib/ossTypes";
 import { ensureAlbumStorageInitialized } from "@/lib/albumStorage";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
@@ -186,19 +186,17 @@ export default function AlbumAdmin() {
       setTab("zones");
       return;
     }
-    setQueue((prev) => {
-      const next = [
-        ...prev,
-        ...files.map((file) => ({
-          key: crypto.randomUUID(),
-          file,
-          relPath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
-          zoneId: dz,
-        })),
-      ];
-      setLastMsg(`已加入 ${files.length} 个文件（当前共 ${next.length} 项）`);
-      return next;
-    });
+    // 先在 updater 之外把新条目算好：
+    // setQueue 的 updater 必须是纯函数——React StrictMode 下会双调用它，
+    // 之前把 setLastMsg 与 crypto.randomUUID() 写在里面，会生成两套 key 并重复提示。
+    const additions: QueueItem[] = files.map((file) => ({
+      key: crypto.randomUUID(),
+      file,
+      relPath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+      zoneId: dz,
+    }));
+    setQueue((prev) => [...prev, ...additions]);
+    setLastMsg(`已加入 ${files.length} 个文件（当前共 ${queue.length + additions.length} 项）`);
   }
 
   function handleCreateZone() {
@@ -333,11 +331,23 @@ export default function AlbumAdmin() {
     try {
       if (uploadToOss) {
         const ossCfg = ossUploadConfig!;
+        // 先探一次上传通道：预检被拒时浏览器只报"网络错误"，无法区分
+        // CORS 未放行 / 账号数据访问被停用 / 网络不可达。先探明再批量上传，
+        // 避免选了上百张图却只得到上百条一模一样的报错。
+        setLastMsg("检查上传通道…");
+        const probe = await probeUploadAccess(ossCfg);
+        if (!probe.ok) {
+          setLastMsg(probe.message);
+          return;
+        }
         setLastMsg("检查并初始化相册存储…");
         await ensureAlbumStorageInitialized(ossCfg);
         const newManifestAssets: Record<string, unknown>[] = [];
         const failedItems: QueueItem[] = [];
         const failures: string[] = [];
+        /** 连续失败计数：连续 3 次失败通常意味着通道整体不可用，继续跑没有意义 */
+        let consecutiveFailures = 0;
+        let abortedEarly = false;
 
         for (let i = 0; i < queue.length; i++) {
           const item = queue[i];
@@ -350,10 +360,28 @@ export default function AlbumAdmin() {
             await putObjectWithSignedUrl(putUrl, cipherBytes, "application/octet-stream");
             // 只有密文确认写入成功才进清单，避免清单出现指向不存在对象的悬空引用
             newManifestAssets.push(row);
+            consecutiveFailures = 0;
           } catch (e) {
             failedItems.push(item);
             failures.push(`${item.relPath}: ${e instanceof Error ? e.message : String(e)}`);
+            consecutiveFailures++;
+            if (consecutiveFailures >= 3 && i + 1 < queue.length) {
+              // 把剩下的也留进队列，稍后一起重试
+              failedItems.push(...queue.slice(i + 1));
+              abortedEarly = true;
+              break;
+            }
           }
+        }
+
+        if (abortedEarly) {
+          setQueue(failedItems);
+          setLastMsg(
+            `连续 ${consecutiveFailures} 项失败，已停止本次上传（剩余 ${failedItems.length} 项保留在列表中）。` +
+              `首个失败原因：${failures[0]}。这通常不是单个文件的问题，而是上传通道整体不可用——` +
+              `请运行 node tools/oss-upload-cors.mjs 查看预检状态，并确认阿里云账号/桶未因欠费等原因停用数据访问。`,
+          );
+          return;
         }
 
         if (!newManifestAssets.length) {

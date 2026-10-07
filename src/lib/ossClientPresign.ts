@@ -10,11 +10,33 @@ function endpointToRegion(endpoint: string): string {
   return "oss-cn-beijing";
 }
 
+/** ali-oss 的实例类型较绕，这里只声明我们实际用到的能力 */
+type PresignClient = {
+  signatureUrl(
+    objectKey: string,
+    options: Record<string, unknown>,
+  ): string | { toString(): string };
+};
+
 /**
- * 在浏览器内用 AccessKey 建立 OSS 客户端（AccessKey 会进内存；
- * 生产环境更推荐 RAM + STS/服务端签名）。
+ * 客户端按凭据缓存。
+ *
+ * 批量上传时每个文件都要签一次名，若每次都新建客户端（动态 import + 解析
+ * endpoint + 构造实例），上千张图会把这些工作白白重复上千遍。
+ * 缓存键包含密钥本身，避免换凭据后误用旧客户端。
  */
-async function createOssClient(config: OssUploadConfig) {
+const clientCache = new Map<string, PresignClient>();
+
+async function getOssClient(config: OssUploadConfig): Promise<PresignClient> {
+  const cacheKey = [
+    config.oss_endpoint,
+    config.oss_bucket_name,
+    config.oss_access_key_id,
+    config.oss_access_key_secret,
+  ].join("|");
+  const cached = clientCache.get(cacheKey);
+  if (cached) return cached;
+
   let mod: typeof import("ali-oss");
   try {
     mod = await import("ali-oss");
@@ -23,18 +45,23 @@ async function createOssClient(config: OssUploadConfig) {
       `加载 ali-oss SDK 失败：${e instanceof Error ? e.message : String(e)}。请检查网络及构建分包是否正常加载。`,
     );
   }
-  const OSS = mod.default;
+
+  let client: PresignClient;
   try {
-    return new OSS({
+    const OSS = mod.default;
+    client = new OSS({
       region: endpointToRegion(config.oss_endpoint),
       accessKeyId: config.oss_access_key_id,
       accessKeySecret: config.oss_access_key_secret,
       bucket: config.oss_bucket_name,
       secure: true,
-    });
+    }) as unknown as PresignClient;
   } catch (e) {
     throw new Error(`初始化 OSS 客户端失败：${e instanceof Error ? e.message : String(e)}`);
   }
+
+  clientCache.set(cacheKey, client);
+  return client;
 }
 
 function toStringUrl(url: string | { toString(): string }): string {
@@ -52,7 +79,7 @@ export async function getPutPresignedUrlWithConfig(
   contentType: string,
   expiresSec = 900,
 ): Promise<string> {
-  const client = await createOssClient(config);
+  const client = await getOssClient(config);
   return toStringUrl(
     client.signatureUrl(objectKey, {
       method: "PUT",
@@ -75,6 +102,6 @@ export async function getDeletePresignedUrlWithConfig(
   config: OssUploadConfig,
   expiresSec = 900,
 ): Promise<string> {
-  const client = await createOssClient(config);
+  const client = await getOssClient(config);
   return toStringUrl(client.signatureUrl(objectKey, { method: "DELETE", expires: expiresSec }));
 }

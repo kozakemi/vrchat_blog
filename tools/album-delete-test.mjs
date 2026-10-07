@@ -39,6 +39,9 @@ let deleteStatus;
 let networkFailure;
 /** 只让 DELETE 失败：真实浏览器里"CORS 未放行 DELETE"就是这个形状（清单读写仍然正常） */
 let deleteNetworkFailure;
+/** 只让 PUT 失败，用于探测用例 */
+let putStatus;
+let putNetworkFailure;
 function reset() {
   objects = new Map();
   ops = [];
@@ -46,6 +49,8 @@ function reset() {
   deleteStatus = 200;
   networkFailure = false;
   deleteNetworkFailure = false;
+  putStatus = 200;
+  putNetworkFailure = false;
 }
 reset();
 
@@ -69,6 +74,8 @@ globalThis.fetch = async (input, init = {}) => {
 
   if (method === "PUT") {
     ops.push(`PUT ${key}`);
+    if (putNetworkFailure) throw new TypeError("fetch failed");
+    if (putStatus !== 200) return new Response("Denied", { status: putStatus });
     const body = init.body && typeof init.body.text === "function" ? await init.body.text() : String(init.body);
     objects.set(key, body);
     return new Response(null, { status: 200 });
@@ -94,9 +101,11 @@ globalThis.fetch = async (input, init = {}) => {
 
 const manifestMod = await server.ssrLoadModule("/src/lib/albumManifestFetch.ts");
 const deleteMod = await server.ssrLoadModule("/src/lib/albumDelete.ts");
+const uploadMod = await server.ssrLoadModule("/src/lib/ossUpload.ts");
 const signMod = await server.ssrLoadModule("/src/lib/ossSignFetch.ts");
 const { buildManifestWithoutAssets, fetchExistingManifestForMerge } = manifestMod;
 const { deleteAlbumAsset } = deleteMod;
+const { probeUploadAccess } = uploadMod;
 
 /** 种一份含两条的清单：a_keep + a_del，并保留 assetsBasePath 这个顶层额外字段 */
 function seed() {
@@ -251,6 +260,52 @@ await test("条目没有 OSS 对象（只有本地 src）→ 不报错，给出�
   });
   assert.equal(report.objectKey, null);
   assert.match(report.warning ?? "", /没有可删除的 OSS 对象/);
+});
+
+console.log("\n【4】上传通道探测（probeUploadAccess：先探明再批量上传）");
+await test("通道正常：探测成功且探针对象被清理", async () => {
+  seed();
+  const probe = await probeUploadAccess(config);
+  assert.equal(probe.ok, true, probe.message);
+  assert.equal(probe.cleanedUp, true);
+  assert.equal(
+    objects.has("albums/assets/__preflight__.bin"),
+    false,
+    "探针对象应当已被删除，不能留下垃圾",
+  );
+  assert.deepEqual(idsOf(), ["a_keep", "a_del"], "探测不得改动清单");
+});
+await test("写入被拒（PUT 403）→ 明确报失败，不留下探针", async () => {
+  seed();
+  putStatus = 403;
+  const probe = await probeUploadAccess(config);
+  putStatus = 200;
+  assert.equal(probe.ok, false);
+  assert.match(probe.message, /上传通道不可用/);
+  assert.equal(objects.has("albums/assets/__preflight__.bin"), false);
+});
+await test("预检被拒（网络层直接失败，真实浏览器里就是这样）→ 提示去看预检状态", async () => {
+  seed();
+  putNetworkFailure = true;
+  const probe = await probeUploadAccess(config);
+  putNetworkFailure = false;
+  assert.equal(probe.ok, false);
+  assert.match(probe.message, /oss-upload-cors|停用/);
+});
+await test("未配置凭据 → 直接报缺配置", async () => {
+  seed();
+  const probe = await probeUploadAccess(null);
+  assert.equal(probe.ok, false);
+  assert.match(probe.message, /尚未配置/);
+});
+await test("可用但探针删不掉 → 仍然算可用，并如实提示残留", async () => {
+  seed();
+  deleteStatus = 403;
+  const probe = await probeUploadAccess(config);
+  deleteStatus = 200;
+  assert.equal(probe.ok, true, "删除失败不该影响'通道可用'的结论");
+  assert.equal(probe.cleanedUp, false);
+  assert.match(probe.message, /删除失败/);
 });
 
 reset();

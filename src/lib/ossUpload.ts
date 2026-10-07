@@ -47,10 +47,14 @@ export async function putObjectWithSignedUrl(
       referrerPolicy: "strict-origin-when-cross-origin",
     });
   } catch {
-    // 跨域预检被拒时浏览器只抛网络错误，无法读取 OSS 的 XML 错误正文。
+    // 跨域预检被拒时浏览器只抛网络错误（Firefox 报 "NetworkError when attempting
+    // to fetch resource."），读不到 OSS 的 XML 错误正文，所以这里把几种常见原因都列出来。
     throw new Error(
-      "上传请求未收到可读响应：请检查网络，以及 OSS 桶的 CORS 是否允许当前站点的 PUT 方法和 Content-Type 请求头。" +
-        "仅允许 GET 会导致相册能读取但无法上传。",
+      "上传请求未收到可读响应（浏览器只报网络错误）。常见原因：" +
+        "① 桶的 CORS 未允许当前站点的 PUT 与 Content-Type；" +
+        "② 桶或账号的数据访问被停用（如欠费），此时连 CORS 预检都会返回 403，" +
+        "可运行 node tools/oss-upload-cors.mjs 看预检状态；" +
+        "③ 本地网络或代理拦截了 oss.aliyuncs.com。",
     );
   }
   if (!res.ok) {
@@ -118,4 +122,71 @@ export async function deleteObjectWithSignedUrl(
     throw new Error(`删除失败：HTTP ${res.status} ${res.statusText}${hint}`);
   }
   return { alreadyGone: false };
+}
+
+/** 上传前探测使用的固定对象键：0 字节，用完立即删除 */
+const PREFLIGHT_OBJECT_KEY = "albums/assets/__preflight__.bin";
+
+export type UploadProbeResult = {
+  ok: boolean;
+  /** 探测消息（失败时给出可操作的原因） */
+  message: string;
+  /** 探针对象是否已清理干净 */
+  cleanedUp: boolean;
+};
+
+/**
+ * 上传前探测：用**真实的 0 字节 PUT** 走一遍完整链路（预检 → 写入 → 删除）。
+ *
+ * 为什么需要它：浏览器在 CORS 预检被拒时只会抛一个"网络错误"，既读不到 OSS 的
+ * 错误码（例如账号欠费导致数据访问停用时的 `UserDisable` 403），也无法区分
+ * "CORS 没配好"、"账号被停用"、"网络不可达"。先单独探一次，就能在开始批量上传前
+ * 给出明确结论——否则选了 500 张图，只会得到 500 条一模一样的报错。
+ *
+ * 探测会真的写入一个 0 字节对象，随后立刻删除；不会碰清单，也不影响相册。
+ */
+export async function probeUploadAccess(
+  clientConfig: OssUploadConfig | null,
+): Promise<UploadProbeResult> {
+  if (!clientConfig) {
+    return { ok: false, message: "尚未配置 OSS 上传凭据", cleanedUp: true };
+  }
+
+  try {
+    const putUrl = await resolvePutSignedUrl(
+      PREFLIGHT_OBJECT_KEY,
+      clientConfig,
+      "application/octet-stream",
+    );
+    await putObjectWithSignedUrl(putUrl, new Uint8Array(0), "application/octet-stream");
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      cleanedUp: true,
+      message:
+        `上传通道不可用：${raw} ` +
+        "如果是网络层错误（Firefox 常显示 NetworkError），请先运行 " +
+        "node tools/oss-upload-cors.mjs 查看预检状态——预检返回 403 时也常见于" +
+        "桶/账号的数据访问被停用（例如欠费），需到阿里云控制台确认费用与账号状态。",
+    };
+  }
+
+  // 能写进去就说明通道可用；顺手清掉探针，删不掉也不算致命。
+  let cleanedUp = false;
+  try {
+    const deleteUrl = await resolveDeleteSignedUrl(PREFLIGHT_OBJECT_KEY, clientConfig);
+    await deleteObjectWithSignedUrl(deleteUrl);
+    cleanedUp = true;
+  } catch {
+    cleanedUp = false;
+  }
+
+  return {
+    ok: true,
+    cleanedUp,
+    message: cleanedUp
+      ? "上传通道正常"
+      : `上传通道可用，但探针对象 ${PREFLIGHT_OBJECT_KEY} 删除失败（可稍后手动清理，不影响使用）`,
+  };
 }

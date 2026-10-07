@@ -53,6 +53,31 @@ GitHub Actions 只部署静态页面，不会更新 OSS CORS。
 脚本使用本机 `keys/oss.json`，冒烟测试另需 `keys/kozakemi.admin.json`。
 管理页可导入 OSS JSON 文件，也可粘贴后保存；凭据仅保存在当前标签页会话中，勿提交到仓库或构建产物。
 
+### 上传/读取整片失败？先确认是不是账号欠费
+
+2026-10 出现过一次「相册整站打不开 + 上传报 `NetworkError when attempting to fetch resource.`」
+（Firefox 措辞；Chrome 为 `Failed to fetch`）。实测同一密钥下：
+
+| 操作 | 结果 |
+|---|---|
+| `getBucketInfo` / `getBucketCORS`（管理面） | ✅ 正常 |
+| AK 认证 GET/PUT 对象、V1 签名 URL、匿名 GET | ❌ 403 `UserDisable`（EC `0003-00000801`） |
+| 函数计算签名服务 `?file=` | ❌ 403 `AccessDenied: Current user is in debt.` |
+
+结论：**阿里云账号欠费**会让 OSS 数据面被停用，而**管理面仍然可用**——很容易误判成
+"密钥写错"或"CORS 没配好"。浏览器在预检拿到 403 时只会抛网络错误，所以界面上只看得到
+"网络错误"，看不到真正原因。
+
+处理：到阿里云控制台结清欠费，然后用下面两条命令确认恢复：
+
+```bash
+node tools/oss-upload-cors.mjs                      # PUT / DELETE 预检都应 200
+node tools/album-upload-smoke.mjs --confirm-write    # 真实跑一遍上传→合并→回读→解密
+```
+
+注意：`npm run test:album-delete` 等测试用内存桩，不受影响；而 `tools/fc-sign/selftest.mjs`
+里"真实 GET 打桶"两项会变红——那正是故障信号，不是代码问题。
+
 OSS 桶完全为空时，相册会显示“暂无照片”。管理员首次点击上传时，程序先自动创建
 `albums/manifest.json` 并回读验证，再写入 `albums/assets/<id>.bin` 并合并清单。
 OSS 使用对象键前缀表示文件夹，写入文件时会自动形成目录，无需手动建立。
