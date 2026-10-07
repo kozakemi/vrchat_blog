@@ -13,6 +13,7 @@ import { base64ToBytes, buildAadJson, importAesGcmKey } from "@/lib/albumCrypto"
 import { deleteAlbumAsset } from "@/lib/albumDelete";
 import { fetchAlbumManifestOrThrow } from "@/lib/albumManifestFetch";
 import { readImageSize, readU32BE } from "@/lib/imageSize";
+import { keyFingerprintB64 } from "@/lib/keyFingerprint";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { fetchSignedUrlForOssObject, invalidateSignedUrlCacheForObjectKey } from "@/lib/ossSignFetch";
 import { loadOssConfigFromSession } from "@/lib/ossUploadConfig";
@@ -44,6 +45,11 @@ type AlbumAsset = {
   mime?: string;
   width?: number;
   height?: number;
+  /** 上传时写入清单的密钥指纹（老数据没有） */
+  keyFp?: string | null;
+  /** 读取时解析出来：这条是不是密文、以及实际用于解密的密钥指纹 */
+  encrypted?: boolean;
+  decryptKeyFp?: string;
   takenAt?: string; // ISO8601（无时区也可）
   world?: {
     worldId?: string | null;
@@ -62,6 +68,10 @@ type AssetResolvedMetadata = {
   /** 从明文字节里读出的真实像素尺寸：清单里没有时靠它补上 */
   width?: number;
   height?: number;
+  /** 这条资源是否为密文（false = 明文对象，没有加密） */
+  encrypted?: boolean;
+  /** 实际成功解密所用的密钥指纹，用于与清单记录的上传时指纹比对 */
+  decryptKeyFp?: string;
   world?: {
     worldId?: string | null;
     worldName?: string | null;
@@ -247,7 +257,8 @@ async function fetchAsBlobUrl(asset: AlbumAsset, signedUrl: string, mimeFallback
   const blob = new Blob([bytes], { type: mime });
   // 有些浏览器/环境下 blob.type 可能为空，这里强制补齐 mime
   const fixedBlob = blob.type ? blob : new Blob([blob], { type: mime });
-  return { objectUrl: URL.createObjectURL(fixedBlob), meta };
+  // 明文对象：完全没有加密，也没有任何密钥参与
+  return { objectUrl: URL.createObjectURL(fixedBlob), meta: { ...meta, encrypted: false } };
 }
 
 async function fetchCipherBlobUrl(
@@ -277,7 +288,12 @@ async function fetchCipherBlobUrl(
   const plainBytes = new Uint8Array(plain);
   const meta = await resolveMetadataFromPlainBytes(asset, plainBytes);
   const blob = new Blob([plainBytes], { type: mimeFallback || "application/octet-stream" });
-  return { objectUrl: URL.createObjectURL(blob), meta };
+  // 能走到这里说明 GCM 认证通过 —— 数学上证明了加密时用的就是这把密钥，
+  // 因此记下它的指纹，供详情面板与清单里的 keyFp 比对。
+  return {
+    objectUrl: URL.createObjectURL(blob),
+    meta: { ...meta, encrypted: true, decryptKeyFp: await keyFingerprintB64(zoneKeyB64) },
+  };
 }
 
 function useAssetImageUrl(
@@ -594,6 +610,9 @@ export default function Album() {
   }, [activeIndex, timeSorted.length]);
 
   const active = activeIndex === null ? null : timeSorted[activeIndex];
+  /** 当前会话是否持有这条资源的 Zone 密钥（详情面板用） */
+  const activeZoneKeyOk = active ? checkAssetAccess(active, keySession?.zones).allowed : false;
+  const activeObjectKey = active ? active.cipherFile?.trim() || active.file?.trim() || "" : "";
 
   useEffect(() => {
     if (!toast) return;
@@ -606,6 +625,30 @@ export default function Album() {
     setIsInfoOpen(false);
     setActiveBlobUrl(undefined);
   }, [activeIndex]);
+
+  useEffect(() => {
+    if (!isInfoOpen || !active) return;
+    // 排查"是否用错密钥上传"时，把关键字段打到控制台，便于直接复制。
+    // 只依赖 isInfoOpen/activeIndex，避免每次渲染都刷屏。
+    console.info("[album] 图片诊断", {
+      assetId: active.assetId,
+      归属Zone: active.zoneId ?? null,
+      当前会话持有该区密钥: activeZoneKeyOk,
+      加密方式:
+        active.encrypted === undefined
+          ? "尚未解密"
+          : active.encrypted
+            ? "密文（AES-256-GCM）"
+            : "明文对象（未加密）",
+      上传时密钥指纹: active.keyFp ?? null,
+      本次解密密钥指纹: active.decryptKeyFp ?? null,
+      指纹一致:
+        active.keyFp && active.decryptKeyFp ? active.keyFp === active.decryptKeyFp : null,
+      OSS对象键: activeObjectKey || null,
+      尺寸: active.width && active.height ? `${active.width}×${active.height}` : null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInfoOpen, activeIndex]);
 
   /** 只有 blob: URL 才能可靠地"另存为"；跨域的 src 兜底会被浏览器忽略 download */
   const canDownloadActive = Boolean(activeBlobUrl?.startsWith("blob:"));
@@ -1073,6 +1116,60 @@ export default function Album() {
                   <div>
                     <span className="text-white/60">拍摄时间：</span>
                     <span className="font-extrabold">{active.takenAt ?? "未知"}</span>
+                  </div>
+                  {/* ---- 以下为排查"是否用错密钥上传"所需的诊断信息 ---- */}
+                  <div>
+                    <span className="text-white/60">归属 Zone：</span>
+                    <span className="font-extrabold">{active.zoneId ?? "（未声明）"}</span>
+                    <span
+                      className={activeZoneKeyOk ? "ml-2 text-emerald-200/90" : "ml-2 text-rose-200/90"}
+                    >
+                      {activeZoneKeyOk ? "当前会话持有该区密钥" : "当前会话没有该区密钥"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-white/60">加密方式：</span>
+                    <span className="font-extrabold">
+                      {active.encrypted === undefined
+                        ? "尚未解密，未知"
+                        : active.encrypted
+                          ? "AES-256-GCM 密文"
+                          : "明文对象（未加密）"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-white/60">上传时密钥指纹：</span>
+                    <span className="font-extrabold">{active.keyFp ?? "（清单未记录）"}</span>
+                  </div>
+                  <div>
+                    <span className="text-white/60">本次解密密钥指纹：</span>
+                    <span className="font-extrabold">{active.decryptKeyFp ?? "（未解密）"}</span>
+                  </div>
+                  {active.keyFp && active.decryptKeyFp ? (
+                    <div
+                      className={
+                        active.keyFp === active.decryptKeyFp
+                          ? "text-emerald-200/90"
+                          : "text-rose-200/90"
+                      }
+                    >
+                      {active.keyFp === active.decryptKeyFp
+                        ? "✓ 加密与解密用的是同一把密钥"
+                        : "⚠️ 加密与解密用的不是同一把密钥（清单记录与实际不符）"}
+                    </div>
+                  ) : null}
+                  {active.encrypted === false ? (
+                    <div className="text-amber-200/90">
+                      ⚠️ 这条是明文对象：没有加密，任何知道该对象键的人都能取到原图
+                    </div>
+                  ) : null}
+                  <div>
+                    <span className="text-white/60">OSS 对象键：</span>
+                    <span className="font-extrabold break-all">{activeObjectKey || "（无）"}</span>
+                  </div>
+                  <div>
+                    <span className="text-white/60">相对路径：</span>
+                    <span className="font-extrabold break-all">{active.relPath ?? "（未记录）"}</span>
                   </div>
                 </div>
               </div>

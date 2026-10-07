@@ -12,7 +12,7 @@ import {
   type KeyFileV1,
 } from "@/lib/keyFile";
 import { PUBLIC_ZONES, canSelfRegister } from "@/lib/publicZones";
-import { useSessionAuthStore } from "@/store/sessionAuthStore";
+import { isSessionPersistenceAvailable, useSessionAuthStore } from "@/store/sessionAuthStore";
 
 const LANG_CYCLE = ["zh", "ja", "en"] as const;
 type AppLanguage = (typeof LANG_CYCLE)[number];
@@ -169,6 +169,12 @@ export default function Home() {
     </button>
   );
 
+  /** 浏览器禁用本地存储时（隐私模式 / 阻止所有 Cookie），登录态无法保留，必须如实告知 */
+  const persistenceAvailable = isSessionPersistenceAvailable();
+  const persistenceNotice = persistenceAvailable ? null : (
+    <div className="login-hint login-hint-warn">{t("persistenceUnavailable")}</div>
+  );
+
   /** 站点标识：登录页顶部原有的 THOSE DAYS 标志 */
   const logo = (
     <div className="logo-bubble" aria-label="Those Days">
@@ -192,6 +198,7 @@ export default function Home() {
               <div className="login-card-header">{t("login")}</div>
               <div className="login-card-body">
                 {notice ? <div className="login-hint login-hint-ok">{notice}</div> : null}
+                {persistenceNotice}
                 <div className="login-hint">
                   {t("loggedInAs", { name: keySession.username })}
                 </div>
@@ -255,6 +262,7 @@ export default function Home() {
               {needKey && !error ? (
                 <div className="login-hint login-hint-warn">{t("needKeyNotice")}</div>
               ) : null}
+              {persistenceNotice}
               {error ? <div className="login-hint login-hint-error">{error}</div> : null}
 
               {tab === "login" ? (

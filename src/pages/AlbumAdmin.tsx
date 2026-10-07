@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import JSZip from "jszip";
 import { encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
+import { keyFingerprintB64 } from "@/lib/keyFingerprint";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
 import {
   buildMergedManifest,
@@ -121,6 +122,12 @@ async function encryptQueueItem(item: QueueItem, zone: KeyFileZoneV1) {
     nonceB64,
     cipherFile: ossKey,
     aad: aadObj,
+    /**
+     * 加密时所用密钥的指纹。写进清单是为了事后能一眼比对
+     * "上传时用的密钥" 与 "现在解密用的密钥" 是否同一把
+     * （排查"是不是用错密钥上传了"这类问题）。
+     */
+    keyFp: await keyFingerprintB64(zone.keyB64),
   };
   return { row, cipherBytes, cipherName, ossKey };
 }

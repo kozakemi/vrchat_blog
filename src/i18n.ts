@@ -42,6 +42,8 @@ i18n.use(initReactI18next).init({
         logout: "退出登录",
         close: "关闭",
         needKeyNotice: "请先导入密钥文件，再进入相册。",
+        persistenceUnavailable:
+          "当前浏览器禁用了本地存储（可能是隐私模式或「阻止所有 Cookie」），登录状态无法保留：刷新页面后需要重新导入密钥。",
         registerNotice: "密钥文件已保存为「{{file}}」。请把它收好——下次进来要用它。",
         errKeyFileRead: "这个文件读不出来，请重新选择。",
         errKeyFileNotJson: "这不是本站的密钥文件，请选择进入相册时下载的 key-*.json。",
@@ -68,6 +70,8 @@ i18n.use(initReactI18next).init({
         logout: "ログアウト",
         close: "閉じる",
         needKeyNotice: "先にキーファイルを選んでください。",
+        persistenceUnavailable:
+          "このブラウザではローカルストレージが無効です（プライベートモードや Cookie のブロックなど）。ログイン状態を保持できないため、再読み込みのたびにキーファイルを選び直す必要があります。",
         registerNotice: "キーファイルを「{{file}}」として保存しました。次回の入室に必要なので大切に保管してください。",
         errKeyFileRead: "ファイルを読み込めませんでした。選び直してください。",
         errKeyFileNotJson: "このサイトのキーファイルではありません。入室時にダウンロードした key-*.json を選んでください。",
@@ -94,6 +98,8 @@ i18n.use(initReactI18next).init({
         logout: "Log out",
         close: "Close",
         needKeyNotice: "Please import your key file first, then enter the album.",
+        persistenceUnavailable:
+          "This browser has local storage disabled (private mode or blocked cookies), so your sign-in cannot be kept — you will need to import your key file again after a refresh.",
         registerNotice: "Your key file was saved as “{{file}}”. Keep it safe — you will need it next time.",
         errKeyFileRead: "That file could not be read. Please pick it again.",
         errKeyFileNotJson: "That is not a key file from this site. Please choose the key-*.json you downloaded.",
