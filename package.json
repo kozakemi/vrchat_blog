@@ -16,7 +16,8 @@
     "test:image-size": "node tools/image-size-test.mjs",
     "test:album-delete": "node tools/album-delete-test.mjs",
     "test:session-persist": "node tools/session-persist-test.mjs",
-    "test:key-fingerprint": "node tools/key-fingerprint-test.mjs"
+    "test:key-fingerprint": "node tools/key-fingerprint-test.mjs",
+    "test:album-metadata": "node tools/album-metadata-test.mjs"
   },
   "dependencies": {
     "@fontsource/nunito": "^5.2.7",

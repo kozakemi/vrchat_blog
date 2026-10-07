@@ -12,6 +12,11 @@ import {
 import { base64ToBytes, buildAadJson, importAesGcmKey } from "@/lib/albumCrypto";
 import { deleteAlbumAsset } from "@/lib/albumDelete";
 import { fetchAlbumManifestOrThrow } from "@/lib/albumManifestFetch";
+import {
+  mergeResolvedMetadata,
+  resolvedMetadataEquals,
+  type AssetResolvedMetadata,
+} from "@/lib/albumResolvedMeta";
 import { readImageSize, readU32BE } from "@/lib/imageSize";
 import { keyFingerprintB64 } from "@/lib/keyFingerprint";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
@@ -61,21 +66,6 @@ type AlbumManifest = {
   schemaVersion: number;
   generatedAt?: string;
   assets: AlbumAsset[];
-};
-
-type AssetResolvedMetadata = {
-  takenAt?: string;
-  /** 从明文字节里读出的真实像素尺寸：清单里没有时靠它补上 */
-  width?: number;
-  height?: number;
-  /** 这条资源是否为密文（false = 明文对象，没有加密） */
-  encrypted?: boolean;
-  /** 实际成功解密所用的密钥指纹，用于与清单记录的上传时指纹比对 */
-  decryptKeyFp?: string;
-  world?: {
-    worldId?: string | null;
-    worldName?: string | null;
-  };
 };
 
 const EXT_BY_MIME: Record<string, string> = {
@@ -498,20 +488,11 @@ export default function Album() {
     () => (assetId: string, meta: AssetResolvedMetadata) => {
       setResolvedMetaById((prev) => {
         const cur = prev[assetId];
-        const next: AssetResolvedMetadata = {
-          takenAt: meta.takenAt || cur?.takenAt,
-          world: {
-            worldId: meta.world?.worldId ?? cur?.world?.worldId ?? null,
-            worldName: meta.world?.worldName ?? cur?.world?.worldName ?? null,
-          },
-        };
-        if (
-          cur?.takenAt === next.takenAt &&
-          cur?.world?.worldId === next.world?.worldId &&
-          cur?.world?.worldName === next.world?.worldName
-        ) {
-          return prev;
-        }
+        // 逐字段合并（见 albumResolvedMeta）：早先这里只重建 takenAt/world，
+        // 把 width/height/encrypted/decryptKeyFp 全丢了，
+        // 导致"尺寸"与"本次解密密钥指纹"永远显示未知。
+        const next = mergeResolvedMetadata(cur, meta);
+        if (resolvedMetadataEquals(cur, next)) return prev;
         return { ...prev, [assetId]: next };
       });
     },
