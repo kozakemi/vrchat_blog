@@ -1,5 +1,14 @@
 /** 与《相册加密方案-实现文档》一致的 AAD 字段顺序 */
 
+/**
+ * 密文对象在桶里的公共前缀。
+ *
+ * 单独抽成常量是因为它被两处共用（上传、改归属 Zone），
+ * 以前各写一份字面量——签名服务的前缀白名单、清单里的 `cipherFile`
+ * 都依赖它一致，抄错了不会报错，只会静默写到别的地方。
+ */
+export const ALBUM_ASSETS_PREFIX = "albums/assets/";
+
 export function buildAadJson(zoneId: string, assetId: string, mime: string): string {
   return JSON.stringify({ v: 1, zoneId, assetId, mime });
 }

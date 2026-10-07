@@ -79,6 +79,29 @@ export function normalizeAlbumManifestPayload(raw: unknown): AlbumManifestPayloa
   );
 }
 
+/**
+ * 组装写回 OSS 的清单根对象 —— 三个构建函数共用。
+ *
+ * 以前每个函数各写一份同样的收尾逻辑（保留 extra、补 assetsBasePath、定字段顺序），
+ * 三份迟早会走样。集中到一处后，「顶层额外字段必须原样保留」这条约定只需要保证一次。
+ */
+function assembleManifestDoc(
+  payload: AlbumManifestPayload | null,
+  assets: unknown[],
+  generatedAt: string,
+): Record<string, unknown> {
+  const extra = payload ? payload.extra : {};
+  const assetsBasePath =
+    typeof extra.assetsBasePath === "string" ? (extra.assetsBasePath as string) : "/albums/";
+  return {
+    ...extra,
+    schemaVersion: payload?.schemaVersion ?? 1,
+    generatedAt,
+    assetsBasePath,
+    assets,
+  };
+}
+
 export type MergedManifestResult = {
   /** 可直接 JSON.stringify 写回 OSS 的完整顶层对象 */
   doc: Record<string, unknown>;
@@ -104,7 +127,6 @@ export function buildMergedManifest(
   generatedAt: string,
 ): MergedManifestResult {
   const payload = existing.status === "ok" ? existing.payload : null;
-  const extra = payload ? payload.extra : {};
 
   const byId = new Map<string, unknown>();
   for (const a of payload?.assets ?? []) {
@@ -117,18 +139,12 @@ export function buildMergedManifest(
     if (typeof id === "string") byId.set(id, a);
   }
 
-  const assetsBasePath =
-    typeof extra.assetsBasePath === "string" ? (extra.assetsBasePath as string) : "/albums/";
-
-  const doc: Record<string, unknown> = {
-    ...extra,
-    schemaVersion: payload?.schemaVersion ?? 1,
-    generatedAt,
-    assetsBasePath,
-    assets: [...byId.values()],
+  const assets = [...byId.values()];
+  return {
+    doc: assembleManifestDoc(payload, assets, generatedAt),
+    previousCount,
+    mergedCount: byId.size,
   };
-
-  return { doc, previousCount, mergedCount: byId.size };
 }
 
 export type ManifestRemovalResult = {
@@ -154,7 +170,6 @@ export function buildManifestWithoutAssets(
   generatedAt: string,
 ): ManifestRemovalResult {
   const payload = existing.status === "ok" ? existing.payload : null;
-  const extra = payload ? payload.extra : {};
   const drop = new Set(assetIdsToRemove);
   const all = payload?.assets ?? [];
 
@@ -164,18 +179,58 @@ export function buildManifestWithoutAssets(
     return !drop.has(id);
   });
 
-  const assetsBasePath =
-    typeof extra.assetsBasePath === "string" ? (extra.assetsBasePath as string) : "/albums/";
-
-  const doc: Record<string, unknown> = {
-    ...extra,
-    schemaVersion: payload?.schemaVersion ?? 1,
-    generatedAt,
-    assetsBasePath,
-    assets: kept,
+  return {
+    doc: assembleManifestDoc(payload, kept, generatedAt),
+    removedCount: all.length - kept.length,
+    remainingCount: kept.length,
   };
+}
 
-  return { doc, removedCount: all.length - kept.length, remainingCount: kept.length };
+export type ManifestReplacementResult = {
+  /** 可直接 JSON.stringify 写回 OSS 的完整顶层对象 */
+  doc: Record<string, unknown>;
+  /** 实际替换掉的条目数：0 表示清单里没有这个 assetId（调用方必须中止）；正常为 1 */
+  replacedCount: number;
+  /** 替换后总条目数（恒等于原条目数：替换不增不减） */
+  totalCount: number;
+};
+
+/**
+ * 把清单里某个 assetId 的条目**原地替换**成新的（用于"改变归属 Zone"这类需要重写加密字段的操作）
+ * —— 纯函数，与 buildMergedManifest / buildManifestWithoutAssets 一样可被测试直接调用。
+ *
+ * 与 buildMergedManifest 的区别很关键：合并是"按 assetId 覆盖、新条目追加到末尾"，
+ * 而这里**必须保持原位置**（相册顺序由拍摄时间决定，但清单顺序不该被这类操作打乱），
+ * 并且**条目数恒定**——它不负责新增，也不负责删除。
+ *
+ * 行为约定：
+ * - 顶层额外字段（assetsBasePath 等）原样保留；
+ * - assetId 缺失或非字符串的条目一律原样保留；
+ * - 找不到目标 id 时返回 replacedCount = 0，由调用方决定是否中止（本功能必须中止：
+ *   清单里没有这条却上传了新对象，只会留下孤儿）。
+ */
+export function buildManifestWithReplacedAsset(
+  existing: ExistingManifestForMerge,
+  assetId: string,
+  replacement: Record<string, unknown>,
+  generatedAt: string,
+): ManifestReplacementResult {
+  const payload = existing.status === "ok" ? existing.payload : null;
+  const all = payload?.assets ?? [];
+  let replacedCount = 0;
+
+  const assets = all.map((a) => {
+    const id = (a as { assetId?: unknown } | null)?.assetId;
+    if (typeof id !== "string" || id !== assetId) return a;
+    replacedCount++;
+    return replacement;
+  });
+
+  return {
+    doc: assembleManifestDoc(payload, assets, generatedAt),
+    replacedCount,
+    totalCount: assets.length,
+  };
 }
 
 function parseManifestJsonText(text: string, requestLabel: string): unknown {

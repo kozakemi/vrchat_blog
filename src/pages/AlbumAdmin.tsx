@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import JSZip from "jszip";
-import { encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
+import { ALBUM_ASSETS_PREFIX, encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
 import { keyFingerprintB64 } from "@/lib/keyFingerprint";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
 import {
@@ -33,7 +33,7 @@ const MIME_BY_EXT: Record<string, string> = {
 
 const FILE_FILTER = /\.(jpe?g|png|webp|gif|mp4|webm)$/i;
 /** 密文对象前缀（清单对象键见 getManifestObjectKey()，可用 VITE_ALBUM_MANIFEST_FILE 覆盖） */
-const ASSETS_PREFIX = "albums/assets/";
+const ASSETS_PREFIX = ALBUM_ASSETS_PREFIX;
 
 /** 单机 ZIP 分卷上限，避免 JSZip.generateAsync 一次性分配过大 ArrayBuffer */
 const ZIP_BATCH_MAX_FILES = 18;

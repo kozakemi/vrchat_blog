@@ -17,13 +17,14 @@ import {
   resolvedMetadataEquals,
   type AssetResolvedMetadata,
 } from "@/lib/albumResolvedMeta";
+import { changeAlbumAssetZone } from "@/lib/albumZoneChange";
 import { readImageSize, readU32BE } from "@/lib/imageSize";
 import { keyFingerprintB64 } from "@/lib/keyFingerprint";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { fetchSignedUrlForOssObject, invalidateSignedUrlCacheForObjectKey } from "@/lib/ossSignFetch";
 import { loadOssConfigFromSession } from "@/lib/ossUploadConfig";
 import { cn } from "@/lib/utils";
-import { AlertCircle, Download, Trash2 } from "lucide-react";
+import { AlertCircle, Download, FolderInput, Trash2 } from "lucide-react";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 type AlbumViewMode = "time" | "world";
@@ -418,6 +419,14 @@ export default function Album() {
   /** 非空表示"部分成功"，确认框改为只展示说明 */
   const [deleteResult, setDeleteResult] = useState<string | null>(null);
 
+  // 管理员修改归属 Zone（仅 isAdmin 可见）：zoneTarget 非空即弹出确认框
+  const [zoneTarget, setZoneTarget] = useState<AlbumAsset | null>(null);
+  const [zoneTargetId, setZoneTargetId] = useState("");
+  const [zoneChanging, setZoneChanging] = useState(false);
+  const [zoneError, setZoneError] = useState<string | null>(null);
+  /** 非空表示"迁移成功但旧文件没删掉"，确认框改为只展示说明 */
+  const [zoneResult, setZoneResult] = useState<string | null>(null);
+
   // 轻量提示（复制到剪贴板）
   const [toast, setToast] = useState<string | null>(null);
 
@@ -595,6 +604,28 @@ export default function Album() {
   const activeZoneKeyOk = active ? checkAssetAccess(active, keySession?.zones).allowed : false;
   const activeObjectKey = active ? active.cipherFile?.trim() || active.file?.trim() || "" : "";
 
+  /**
+   * 「改 Zone」弹窗所需的派生信息。
+   *
+   * 目标 Zone 只能从**当前会话自己持有的 Zone** 里挑：迁移要用新 Zone 的密钥重新加密，
+   * 手里没有密钥就无从加密。同理，如果连旧 Zone 的密钥都没有（密文解不开），
+   * 这个操作根本不可能完成，界面要提前说清楚而不是等点了按钮再报错。
+   */
+  const zoneDialog = useMemo(() => {
+    if (!zoneTarget) return null;
+    const zones = keySession?.zones ?? [];
+    const from = zoneTarget.zoneId?.trim() || "";
+    const isCipher = Boolean(zoneTarget.cipherFile?.trim());
+    return {
+      from,
+      isCipher,
+      /** 非密文（明文对象）不需要旧密钥；密文则必须持有旧 Zone 的密钥才解得开 */
+      hasSourceKey: !isCipher || zones.some((z) => z.zoneId === from),
+      options: zones.filter((z) => z.zoneId !== from),
+      fileName: downloadFilename(zoneTarget),
+    };
+  }, [zoneTarget, keySession?.zones]);
+
   useEffect(() => {
     if (!toast) return;
     const t = window.setTimeout(() => setToast(null), 1600);
@@ -605,6 +636,11 @@ export default function Album() {
     // 切换图片或关闭 lightbox 时，默认关闭“更多信息”，并清掉上一张的下载地址
     setIsInfoOpen(false);
     setActiveBlobUrl(undefined);
+    // 「改 Zone」弹窗绑定的是某一张具体的照片，换图后必须收起，
+    // 否则会对着 A 的确认框去改 B。
+    setZoneTarget(null);
+    setZoneError(null);
+    setZoneResult(null);
   }, [activeIndex]);
 
   useEffect(() => {
@@ -680,6 +716,60 @@ export default function Album() {
       setDeleteError(e instanceof Error ? e.message : String(e));
     } finally {
       setDeleting(false);
+    }
+  }
+
+  /**
+   * 确认迁移：取回原图 → 用旧 Zone 密钥解密 → 用新 Zone 密钥重新加密
+   * → 上传为新对象 → 改写清单 → 删除旧对象。
+   *
+   * 顺序与"任何一步失败都还能看"的保证都由 changeAlbumAssetZone 负责，
+   * 这里只处理界面状态与内存里的明文缓存。
+   */
+  async function confirmChangeZone() {
+    if (!zoneTarget) return;
+    const cfg = loadOssConfigFromSession();
+    if (!cfg) {
+      setZoneError("需要先在「相册管理」页保存 OSS 上传配置，迁移请求才能签名。");
+      return;
+    }
+    const target = zoneTargetId.trim();
+    if (!target) {
+      setZoneError("请选择要换成哪个 Zone");
+      return;
+    }
+
+    setZoneChanging(true);
+    setZoneError(null);
+    try {
+      const report = await changeAlbumAssetZone(cfg, zoneTarget, target, keySession?.zones ?? []);
+
+      // 已解密的明文留在内存里已经没有意义了，全部丢掉：
+      // 旧对象键下的缓存不只是浪费内存，它还会让"迁移后仍显示旧内容"这种情况发生。
+      for (const key of [report.newObjectKey, ...report.orphanObjectKeys]) {
+        removeAlbumBlobUrl(key);
+      }
+      const oldCipher = zoneTarget.cipherFile?.trim();
+      const oldPlain = zoneTarget.file?.trim();
+      if (oldCipher) removeAlbumBlobUrl(oldCipher);
+      if (oldPlain) removeAlbumBlobUrl(oldPlain);
+
+      await refetchManifest();
+
+      if (report.warning) {
+        setZoneResult(report.warning);
+        return;
+      }
+      setZoneTarget(null);
+      setToast(
+        report.fromPlaintext
+          ? `已加密并归入 Zone「${report.toZoneId}」`
+          : `已改成 Zone「${report.toZoneId}」`,
+      );
+    } catch (e) {
+      setZoneError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setZoneChanging(false);
     }
   }
 
@@ -1003,7 +1093,7 @@ export default function Album() {
                   </button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 <button
                   type="button"
                   className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10 disabled:opacity-40"
@@ -1029,6 +1119,25 @@ export default function Album() {
                     更多
                   </span>
                 </button>
+                {keySession?.isAdmin ? (
+                  <button
+                    type="button"
+                    className="rounded-xl border border-sky-400/40 bg-sky-500/15 px-3 py-2 text-xs font-extrabold text-sky-100 hover:bg-sky-500/25"
+                    title="把这张照片改成归属另一个 Zone"
+                    aria-label="修改归属 Zone"
+                    onClick={() => {
+                      setZoneError(null);
+                      setZoneResult(null);
+                      setZoneTargetId("");
+                      setZoneTarget(active);
+                    }}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <FolderInput className="h-4 w-4" aria-hidden="true" />
+                      改 Zone
+                    </span>
+                  </button>
+                ) : null}
                 {keySession?.isAdmin ? (
                   <button
                     type="button"
@@ -1236,6 +1345,128 @@ export default function Album() {
                     onClick={() => void confirmDelete()}
                   >
                     {deleting ? "正在删除…" : "确认删除"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {zoneTarget && zoneDialog ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="修改归属 Zone"
+          onClick={() => {
+            if (zoneChanging) return;
+            setZoneTarget(null);
+            setZoneResult(null);
+            setZoneError(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-sky-400/30 bg-zinc-900/95 p-4 text-sm text-white/90 shadow-[0_18px_60px_rgba(0,0,0,0.5)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {zoneResult ? (
+              <>
+                <div className="text-sm font-extrabold text-amber-200">已换好，但旧文件没删掉</div>
+                <p className="mt-2 text-xs leading-relaxed text-white/75">{zoneResult}</p>
+                <div className="mt-4 flex justify-end">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10"
+                    onClick={() => {
+                      setZoneTarget(null);
+                      setZoneResult(null);
+                    }}
+                  >
+                    关闭
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-sm font-extrabold text-sky-100">把这张照片换个 Zone</div>
+                <p className="mt-2 break-all text-xs text-white/70">{zoneDialog.fileName}</p>
+
+                <div className="mt-3 space-y-1 text-xs text-white/70">
+                  <div>
+                    现在的 Zone：
+                    <span className="font-extrabold text-white/90">
+                      {zoneDialog.from || "（没记录）"}
+                    </span>
+                  </div>
+                  <div>
+                    当前状态：
+                    <span className="font-extrabold text-white/90">
+                      {zoneDialog.isCipher ? "已加密" : "未加密（这次会顺便加密）"}
+                    </span>
+                  </div>
+                </div>
+
+                {!zoneDialog.hasSourceKey ? (
+                  <p className="mt-3 rounded-lg border border-rose-400/30 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-100">
+                    你的密钥文件里没有「{zoneDialog.from}」的密钥，打不开这张照片，所以换不了。
+                    请改用包含这个 Zone 的密钥文件。
+                  </p>
+                ) : zoneDialog.options.length === 0 ? (
+                  <p className="mt-3 rounded-lg border border-amber-400/30 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-100">
+                    你的密钥文件里没有别的 Zone 可以换。请先到「相册管理 → 创建与管理 Zone」新建一个。
+                  </p>
+                ) : (
+                  <label className="mt-3 block text-[11px] text-white/60">
+                    换成哪个 Zone
+                    <select
+                      aria-label="目标 Zone"
+                      className="mt-1 w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs text-white"
+                      value={zoneTargetId}
+                      onChange={(e) => setZoneTargetId(e.target.value)}
+                    >
+                      <option value="">请选择</option>
+                      {zoneDialog.options.map((z) => (
+                        <option key={z.zoneId} value={z.zoneId}>
+                          {z.zoneId}
+                          {z.comment ? ` — ${z.comment}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                <p className="mt-3 text-[11px] leading-relaxed text-white/55">
+                  照片内容不会被改动。过程是：取回这张照片 → 用现在的密钥解开 → 用新 Zone
+                  的密钥重新加密 → 传成新文件 → 让相册指向它 → 删掉旧文件。
+                  会按原始大小下载并上传一次，所以大图需要等一会儿。
+                </p>
+
+                {zoneError ? (
+                  <p className="mt-3 rounded-lg border border-rose-400/30 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-100">
+                    {zoneError}
+                  </p>
+                ) : null}
+
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={zoneChanging}
+                    className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10 disabled:opacity-40"
+                    onClick={() => {
+                      setZoneTarget(null);
+                      setZoneError(null);
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={zoneChanging || !zoneTargetId || !zoneDialog.hasSourceKey}
+                    className="rounded-xl border border-sky-400/50 bg-sky-500/30 px-4 py-2 text-xs font-extrabold text-sky-50 hover:bg-sky-500/40 disabled:opacity-40"
+                    onClick={() => void confirmChangeZone()}
+                  >
+                    {zoneChanging ? "正在迁移…" : "确认换区"}
                   </button>
                 </div>
               </>

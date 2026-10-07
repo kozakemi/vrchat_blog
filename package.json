@@ -15,6 +15,7 @@
     "test:album-access": "node tools/album-access-test.mjs",
     "test:image-size": "node tools/image-size-test.mjs",
     "test:album-delete": "node tools/album-delete-test.mjs",
+    "test:album-zone-change": "node tools/album-zone-change-test.mjs",
     "test:session-persist": "node tools/session-persist-test.mjs",
     "test:key-fingerprint": "node tools/key-fingerprint-test.mjs",
     "test:album-metadata": "node tools/album-metadata-test.mjs"
