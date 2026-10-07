@@ -39,7 +39,7 @@ export function normalizeSignedUrl(value: string): string {
  * 若签名服务误把链接写成当前站点（localhost），仍改写为 Bucket 域名 + 同一路径与查询串。
  */
 export function resolveSignedUrlToAbsolute(signedUrl: string, bucketOriginOverride?: string): string {
-  let s = normalizeSignedUrl(signedUrl);
+  const s = normalizeSignedUrl(signedUrl);
   const bucketOrigin = (bucketOriginOverride || DEFAULT_SIGNED_URL_ORIGIN).replace(/\/+$/, "");
   if (/^https?:\/\//i.test(s)) {
     try {

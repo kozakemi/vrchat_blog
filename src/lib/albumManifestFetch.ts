@@ -2,7 +2,7 @@ import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { fetchSignedUrlForOssObject, getOssSignEndpoint } from "@/lib/ossSignFetch";
 import { getAlbumManifestUrl, getOptionalDirectManifestUrl } from "@/lib/manifestUrl";
 
-/** 与 AlbumAdmin 上传的 MANIFEST_KEY 默认一致；可通过 VITE_ALBUM_MANIFEST_FILE 覆盖 */
+/** 与 AlbumAdmin 上传清单时使用的默认对象键一致（见 getManifestObjectKey）；可用 VITE_ALBUM_MANIFEST_FILE 覆盖 */
 export const DEFAULT_MANIFEST_OBJECT_KEY = "albums/manifest.json";
 
 export function getManifestObjectKey(): string {
@@ -72,11 +72,15 @@ function parseManifestJsonText(text: string, requestLabel: string): unknown {
   }
 }
 
+type ManifestFetchOutcome =
+  | { status: "ok"; text: string; label: string }
+  | { status: "http-error"; httpStatus: number; label: string };
+
 /**
- * 优先与图片相同：经函数计算换取 manifest 临时 URL，再 fetch JSON。
- * 未配置签名服务时回退为直接 URL（本地 public 或 VITE_ALBUM_MANIFEST_URL / 同源路径）。
+ * 按优先级解析清单地址并取回文本。
+ * 只区分「HTTP 成功」与「HTTP 失败」，不抛 HTTP 异常——由调用方决定失败语义。
  */
-export async function fetchAlbumManifestOrThrow(): Promise<unknown> {
+async function loadManifestText(): Promise<ManifestFetchOutcome> {
   const directFirst = getOptionalDirectManifestUrl();
   if (directFirst) {
     const url = rewriteOssUrlForDevFetch(directFirst);
@@ -84,9 +88,8 @@ export async function fetchAlbumManifestOrThrow(): Promise<unknown> {
       cache: "no-store",
       referrerPolicy: "strict-origin-when-cross-origin",
     });
-    if (!r.ok) throw new Error(`加载 manifest 失败：HTTP ${r.status}。请求：${directFirst}`);
-    const text = await r.text();
-    return normalizeAlbumManifestPayload(parseManifestJsonText(text, directFirst));
+    if (!r.ok) return { status: "http-error", httpStatus: r.status, label: directFirst };
+    return { status: "ok", text: await r.text(), label: directFirst };
   }
 
   const signEp = getOssSignEndpoint();
@@ -102,26 +105,58 @@ export async function fetchAlbumManifestOrThrow(): Promise<unknown> {
       cache: "no-store",
       referrerPolicy: "strict-origin-when-cross-origin",
     });
-    if (!r.ok) {
-      throw new Error(`加载 manifest 失败：HTTP ${r.status}（对象键：${manifestKey}）`);
-    }
-    const text = await r.text();
-    return normalizeAlbumManifestPayload(parseManifestJsonText(text, manifestKey));
+    if (!r.ok) return { status: "http-error", httpStatus: r.status, label: manifestKey };
+    return { status: "ok", text: await r.text(), label: manifestKey };
   }
 
   const logicalUrl = getAlbumManifestUrl();
   const url = rewriteOssUrlForDevFetch(logicalUrl);
   const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`加载 manifest 失败：HTTP ${r.status}。请求：${logicalUrl}`);
-  const text = await r.text();
-  return normalizeAlbumManifestPayload(parseManifestJsonText(text, logicalUrl));
+  if (!r.ok) return { status: "http-error", httpStatus: r.status, label: logicalUrl };
+  return { status: "ok", text: await r.text(), label: logicalUrl };
 }
 
-/** 管理端合并清单：失败则视为空清单 */
-export async function tryFetchAlbumManifest(): Promise<unknown | null> {
+/**
+ * 优先与图片相同：经函数计算换取 manifest 临时 URL，再 fetch JSON。
+ * 未配置签名服务时回退为直接 URL（本地 public 或 VITE_ALBUM_MANIFEST_URL / 同源路径）。
+ */
+export async function fetchAlbumManifestOrThrow(): Promise<unknown> {
+  const out = await loadManifestText();
+  if (out.status === "http-error") {
+    throw new Error(`加载 manifest 失败：HTTP ${out.httpStatus}。请求：${out.label}`);
+  }
+  return normalizeAlbumManifestPayload(parseManifestJsonText(out.text, out.label));
+}
+
+export type ExistingManifestForMerge =
+  | { status: "ok"; payload: AlbumManifestPayload }
+  | { status: "missing" };
+
+/**
+ * 管理端「写清单之前」读取现有清单——语义比 fetchAlbumManifestOrThrow 更严格：
+ *
+ * - 仅当对象确实不存在（HTTP 404，例如首次上传）才返回 `missing`，此时按空清单合并是正确的；
+ * - 其余任何失败（网络、签名、返回 HTML、缺 assets 字段）一律抛出。
+ *
+ * 绝不退化成 null 让调用方当成空清单：那会用「只含本次新增」的清单覆盖线上已有条目，
+ * 造成静默的全量数据丢失。
+ */
+export async function fetchExistingManifestForMerge(): Promise<ExistingManifestForMerge> {
+  const out = await loadManifestText();
+  if (out.status === "http-error") {
+    if (out.httpStatus === 404) return { status: "missing" };
+    throw new Error(
+      `读取现有清单失败：HTTP ${out.httpStatus}。请求：${out.label}。已中止写入，以免覆盖线上清单。`,
+    );
+  }
+
   try {
-    return await fetchAlbumManifestOrThrow();
-  } catch {
-    return null;
+    return {
+      status: "ok",
+      payload: normalizeAlbumManifestPayload(parseManifestJsonText(out.text, out.label)),
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`现有清单无法解析，已中止写入以免覆盖：${msg}`);
   }
 }

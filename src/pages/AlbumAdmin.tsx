@@ -4,7 +4,7 @@ import JSZip from "jszip";
 import { encryptPlaintextToParts, generateZoneKeyB64, newAssetId } from "@/lib/albumCrypto";
 import { hasAlbumRouteAccess } from "@/lib/authGate";
 import { keyFileToDownloadJson, type KeyFileV1, type KeyFileZoneV1 } from "@/lib/keyFile";
-import { getManifestObjectKey, tryFetchAlbumManifest } from "@/lib/albumManifestFetch";
+import { fetchExistingManifestForMerge, getManifestObjectKey } from "@/lib/albumManifestFetch";
 import { getAlbumManifestUrl } from "@/lib/manifestUrl";
 import { getOssSignEndpoint } from "@/lib/ossSignFetch";
 import {
@@ -29,8 +29,7 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 const FILE_FILTER = /\.(jpe?g|png|webp|gif|mp4|webm)$/i;
-/** 与 getAlbumManifestUrl 默认路径一致；密文放在 albums/assets/ */
-const MANIFEST_KEY = "albums/manifest.json";
+/** 密文对象前缀（清单对象键见 getManifestObjectKey()，可用 VITE_ALBUM_MANIFEST_FILE 覆盖） */
 const ASSETS_PREFIX = "albums/assets/";
 
 /** 单机 ZIP 分卷上限，避免 JSZip.generateAsync 一次性分配过大 ArrayBuffer */
@@ -259,33 +258,61 @@ export default function AlbumAdmin() {
     setLastMsg("已清除 OSS 上传配置");
   }
 
-  async function mergeAndUploadManifest(newAssets: Record<string, unknown>[], ossCfg: OssUploadConfig) {
-    let existing: { schemaVersion?: number; generatedAt?: string; assets?: Record<string, unknown>[] } =
-      { schemaVersion: 1, assets: [] };
-    const remote = await tryFetchAlbumManifest();
-    if (remote && typeof remote === "object" && remote !== null) {
-      existing = remote as typeof existing;
-    }
-    const prevAssets = Array.isArray(existing.assets) ? existing.assets : [];
+  /**
+   * 合并并上传清单。三道防线，保证「清单永不出现悬空引用、永不丢已有条目」：
+   * 1. 写前严格读取现有清单：读取/解析失败一律中止，只有 404 才按空清单处理；
+   * 2. 写入后立即回读校验：新增条目与原有条目必须全部在场；
+   * 3. 校验不通过时抛错，由调用方下载 manifest-backup 兜底，绝不静默成功。
+   *
+   * 已知局限：OSS 单对象 PUT 没有 CAS/乐观锁，两个标签页同时合并仍可能互相覆盖，
+   * 回读校验只能发现、无法阻止。要彻底解决需把合并逻辑放到服务端串行化。
+   */
+  async function mergeAndUploadManifest(
+    newAssets: Record<string, unknown>[],
+    ossCfg: OssUploadConfig,
+  ): Promise<{ previousCount: number; mergedCount: number }> {
+    const current = await fetchExistingManifestForMerge();
+    const prevAssets = current.status === "ok" ? current.payload.assets : [];
+    const schemaVersion = current.status === "ok" ? current.payload.schemaVersion : 1;
+
     const byId = new Map<string, Record<string, unknown>>();
     for (const a of prevAssets) {
       const id = (a as { assetId?: string }).assetId;
       if (typeof id === "string") byId.set(id, a as Record<string, unknown>);
     }
+    const previousCount = byId.size;
     for (const a of newAssets) {
       const id = a.assetId as string;
       if (typeof id === "string") byId.set(id, a);
     }
+
     const merged = {
-      schemaVersion: existing.schemaVersion ?? 1,
+      schemaVersion: schemaVersion ?? 1,
       generatedAt: new Date().toISOString(),
       assetsBasePath: "/albums/",
       assets: [...byId.values()],
     };
     const body = JSON.stringify(merged, null, 2);
-    const blob = new Blob([body], { type: "application/json" });
-    const putUrl = await resolvePutSignedUrl(MANIFEST_KEY, ossCfg, "application/json");
-    await putObjectWithSignedUrl(putUrl, blob, "application/json");
+    const objectKey = getManifestObjectKey();
+    const putUrl = await resolvePutSignedUrl(objectKey, ossCfg, "application/json");
+    await putObjectWithSignedUrl(putUrl, new Blob([body], { type: "application/json" }), "application/json");
+
+    const after = await fetchExistingManifestForMerge();
+    if (after.status !== "ok") {
+      throw new Error(`清单写入后回读失败（对象键 ${objectKey}），无法确认是否落盘，请到 OSS 控制台核对`);
+    }
+    const afterIds = new Set(
+      after.payload.assets
+        .map((a) => (a as { assetId?: string }).assetId)
+        .filter((v): v is string => typeof v === "string"),
+    );
+    const lost = [...byId.keys()].filter((id) => !afterIds.has(id));
+    if (lost.length) {
+      throw new Error(
+        `清单回读校验不通过：${lost.length} 条记录不在写入结果中（如 ${lost.slice(0, 3).join(", ")}），可能存在并发写入或被覆盖`,
+      );
+    }
+    return { previousCount, mergedCount: afterIds.size };
   }
 
   async function runEncrypt(uploadToOss: boolean) {
@@ -310,40 +337,58 @@ export default function AlbumAdmin() {
       if (uploadToOss) {
         const ossCfg = ossUploadConfig!;
         const newManifestAssets: Record<string, unknown>[] = [];
-        const binUploadFailures: string[] = [];
+        const failedItems: QueueItem[] = [];
+        const failures: string[] = [];
 
         for (let i = 0; i < queue.length; i++) {
           const item = queue[i];
           setLastMsg(`加密并上传 ${i + 1}/${queue.length}…`);
-          const zone = zoneOptions.find((z) => z.zoneId === item.zoneId)!;
-          const { row, cipherBytes, ossKey } = await encryptQueueItem(item, zone);
-          newManifestAssets.push(row);
-
           try {
+            const zone = zoneOptions.find((z) => z.zoneId === item.zoneId);
+            if (!zone) throw new Error(`Zone「${item.zoneId}」不存在`);
+            const { row, cipherBytes, ossKey } = await encryptQueueItem(item, zone);
             const putUrl = await resolvePutSignedUrl(ossKey, ossCfg, "application/octet-stream");
             await putObjectWithSignedUrl(putUrl, cipherBytes, "application/octet-stream");
+            // 只有密文确认写入成功才进清单，避免清单出现指向不存在对象的悬空引用
+            newManifestAssets.push(row);
           } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            binUploadFailures.push(`${ossKey}: ${msg}`);
+            failedItems.push(item);
+            failures.push(`${item.relPath}: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
 
+        if (!newManifestAssets.length) {
+          setQueue(failedItems);
+          setLastMsg(
+            `全部 ${failures.length} 项失败，未写入清单（避免清单指向不存在的密文）。首个错误 —— ${failures[0]}`,
+          );
+          return;
+        }
+
         try {
-          await mergeAndUploadManifest(newManifestAssets, ossCfg);
+          const result = await mergeAndUploadManifest(newManifestAssets, ossCfg);
+          const warn = failures.length
+            ? `；另有 ${failures.length} 项失败，已保留在列表中可重试（首个：${failures[0]}）`
+            : "";
+          setLastMsg(
+            `清单已更新并通过回读校验：原有 ${result.previousCount} 条 + 本次 ${newManifestAssets.length} 条 = ${result.mergedCount} 条。` +
+              `密文位于 ${ASSETS_PREFIX}（浏览器内签名，未整包 ZIP）${warn}`,
+          );
+          setQueue(failedItems);
         } catch (e) {
           downloadBlob(
             `manifest-backup-${Date.now()}.json`,
-            new Blob([JSON.stringify({ assets: newManifestAssets }, null, 2)], { type: "application/json" }),
+            new Blob(
+              [JSON.stringify({ schemaVersion: 1, assets: newManifestAssets }, null, 2)],
+              { type: "application/json" },
+            ),
           );
-          throw e;
+          setQueue(failedItems);
+          setLastMsg(
+            `密文已上传 ${newManifestAssets.length} 个，但清单写入/校验失败：${e instanceof Error ? e.message : String(e)}。` +
+              `已下载 manifest-backup-*.json 作为兜底；请先排查签名服务与桶权限，确认清单状态后再重试，切勿盲目重复上传。`,
+          );
         }
-
-        let msg = `已上传清单 ${MANIFEST_KEY}，并尝试上传 ${newManifestAssets.length} 个密文到 ${ASSETS_PREFIX}（使用本页保存的 OSS 配置在浏览器内签名；未整包 ZIP）`;
-        if (binUploadFailures.length) {
-          msg += `（${binUploadFailures.length} 个对象 PUT 失败或缺少签名：${binUploadFailures.slice(0, 3).join(", ")}${binUploadFailures.length > 3 ? "…" : ""}）`;
-        }
-        setLastMsg(msg);
-        setQueue([]);
         return;
       }
 
@@ -496,9 +541,9 @@ export default function AlbumAdmin() {
               Zone。<span className="text-amber-200/90">大批量优先使用「加密并上传到 OSS」</span>
               （不会在浏览器里整包 ZIP，避免内存不足）；「仅打包下载」会按约 {ZIP_BATCH_MAX_FILES} 张/
               {Math.round(ZIP_BATCH_MAX_BYTES / (1024 * 1024))}MB 原图体积分卷多个 ZIP。上传使用上方 JSON 在浏览器内生成 OSS 预签名
-              PUT；若客户端签名失败，可再尝试部署签名服务（<code className="rounded bg-black/40 px-1">VITE_OSS_SIGN_ENDPOINT</code>
-              ）。清单合并至 <code className="rounded bg-black/40 px-1">{MANIFEST_KEY}</code>
-              （与相册默认清单路径一致），密文放到 <code className="rounded bg-black/40 px-1">{ASSETS_PREFIX}</code>。
+              PUT（<span className="text-rose-200/90">当前函数计算仅提供 GET 签名，PUT 必须依赖上方 OSS 配置</span>）；
+              清单合并至 <code className="rounded bg-black/40 px-1">{getManifestObjectKey()}</code>
+              （与相册读取清单的对象键一致），密文放到 <code className="rounded bg-black/40 px-1">{ASSETS_PREFIX}</code>。
             </p>
 
             <div className="flex flex-wrap gap-3">

@@ -3,33 +3,15 @@ import { getPutPresignedUrlWithConfig } from "@/lib/ossClientPresign";
 import type { OssUploadConfig } from "@/lib/ossTypes";
 import { ossBucketPublicOrigin, resolveSignedUrlToAbsolute } from "@/lib/ossSignedUrl";
 
-type PutSignResponse = {
-  signedUrl?: string;
-};
-
-const SIGN_ENDPOINT =
-  import.meta.env.VITE_OSS_SIGN_ENDPOINT ?? "https://vrchat-oss-wdmpygkprb.cn-beijing.fcapp.run";
-
-/**
- * 向签名服务申请 PUT 预签名 URL（需在 FC 等后端实现 `?put=1&key=<对象键>`）。
- * key 为 OSS 对象键，例如 `manifest.json` 或 `albums/assets/a_xxx.bin`
- */
-export async function fetchPutSignedUrl(objectKey: string): Promise<string | null> {
-  const endpoint = SIGN_ENDPOINT?.trim();
-  if (!endpoint) return null;
-  const url = `${endpoint.replace(/\/+$/, "")}?put=1&key=${encodeURIComponent(objectKey)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) return null;
-  const data = (await res.json()) as PutSignResponse;
-  const raw = data.signedUrl?.trim();
-  if (!raw) return null;
-  return resolveSignedUrlToAbsolute(String(raw));
-}
-
 /**
  * 生成 PUT 预签名 URL。
- * - 已填写网页 OSS JSON 时：仅用浏览器内签名（便于排查错误，不再静默退回 FC）。
- * - 未填写 JSON 时：退回签名服务 `?put=1&key=`。
+ *
+ * 目前**只支持**浏览器内用 OSS 配置（上方 JSON）签名。
+ * 曾经存在的「退回签名服务 `?put=1&key=`」路径已移除，原因（2026-10 实测线上 FC）：
+ *   - `?put=1&key=<k>` 返回 `400 {"error":"缺少 file 参数"}`；
+ *   - `?put=1&file=<k>` / `?file=<k>&method=PUT` 返回的签名与纯 GET 签名逐字节相同。
+ * OSS 签名包含 HTTP 方法，GET 签名无法授权 PUT，继续退回只会得到难以定位的 403。
+ * 因此未配置 OSS JSON 时直接给出可操作的报错，而不是静默走一条死路。
  *
  * @param contentType 必须与随后 PUT 请求的 Content-Type 完全一致（含 application/json）
  */
@@ -38,18 +20,15 @@ export async function resolvePutSignedUrl(
   clientConfig: OssUploadConfig | null,
   contentType = "application/octet-stream",
 ): Promise<string> {
-  if (clientConfig) {
-    const origin = ossBucketPublicOrigin(clientConfig.oss_bucket_name, clientConfig.oss_endpoint);
-    const url = await getPutPresignedUrlWithConfig(objectKey, clientConfig, contentType);
-    return resolveSignedUrlToAbsolute(url, origin);
-  }
-  const u = await fetchPutSignedUrl(objectKey);
-  if (!u) {
+  if (!clientConfig) {
     throw new Error(
-      "未配置 OSS 网页 JSON，且签名服务未返回 PUT 地址（请部署 VITE_OSS_SIGN_ENDPOINT 的 put=1 接口）",
+      `未配置 OSS 上传凭据，无法为「${objectKey}」生成 PUT 预签名：` +
+        "请在管理页「OSS 上传配置」中填写 AccessKey JSON 并保存（签名服务只提供 GET 签名，不能替代）",
     );
   }
-  return resolveSignedUrlToAbsolute(u);
+  const origin = ossBucketPublicOrigin(clientConfig.oss_bucket_name, clientConfig.oss_endpoint);
+  const url = await getPutPresignedUrlWithConfig(objectKey, clientConfig, contentType);
+  return resolveSignedUrlToAbsolute(url, origin);
 }
 
 export async function putObjectWithSignedUrl(
