@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "check": "tsc -b --noEmit",
     "album:manifest": "node tools/album-manifest/generate-manifest.js --in VRChat --out public/albums/manifest.json --file-prefix VRChat",
-    "album:admin-key": "node tools/generate-admin-key.mjs"
+    "album:admin-key": "node tools/generate-admin-key.mjs",
+    "test:album-empty": "node tools/album-empty-storage-test.mjs"
   },
   "dependencies": {
     "@fontsource/nunito": "^5.2.7",

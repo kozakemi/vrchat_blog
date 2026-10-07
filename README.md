@@ -43,6 +43,12 @@ GitHub Actions 只部署静态页面，不会更新 OSS CORS。
 脚本使用本机 `keys/oss.json`，冒烟测试另需 `keys/kozakemi.admin.json`。
 管理页可导入 OSS JSON 文件，也可粘贴后保存；凭据仅保存在当前标签页会话中，勿提交到仓库或构建产物。
 
+OSS 桶完全为空时，相册会显示“暂无照片”。管理员首次点击上传时，程序先自动创建
+`albums/manifest.json` 并回读验证，再写入 `albums/assets/<id>.bin` 并合并清单。
+OSS 使用对象键前缀表示文件夹，写入文件时会自动形成目录，无需手动建立。
+只有清单明确返回 404 才初始化；权限、网络或 JSON 解析错误会中止上传，避免覆盖已有数据。
+运行 `npm run test:album-empty` 可在内存存储中验证空桶初始化和这些失败情况，不会访问生产 OSS。
+
 ## 📅 开发计划
 
 - [x] 静态首页搭建

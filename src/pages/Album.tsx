@@ -702,6 +702,12 @@ export default function Album() {
                 </div>
               </div>
 
+              {manifest.assets.length === 0 ? (
+                <div className="mt-10 text-center text-sm font-bold text-white/70">
+                  相册暂无照片，管理员上传后会自动显示。
+                </div>
+              ) : null}
+
               {mode === "time" ? (
                 <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                   {visibleTimeAssets.map((a) => (

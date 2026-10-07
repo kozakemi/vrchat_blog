@@ -20,6 +20,7 @@ import {
 } from "@/lib/ossUploadConfig";
 import { putObjectWithSignedUrl, resolvePutSignedUrl } from "@/lib/ossUpload";
 import type { OssUploadConfig } from "@/lib/ossTypes";
+import { ensureAlbumStorageInitialized } from "@/lib/albumStorage";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -342,6 +343,8 @@ export default function AlbumAdmin() {
     try {
       if (uploadToOss) {
         const ossCfg = ossUploadConfig!;
+        setLastMsg("检查并初始化相册存储…");
+        await ensureAlbumStorageInitialized(ossCfg);
         const newManifestAssets: Record<string, unknown>[] = [];
         const failedItems: QueueItem[] = [];
         const failures: string[] = [];

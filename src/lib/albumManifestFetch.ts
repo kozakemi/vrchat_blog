@@ -197,6 +197,10 @@ async function loadManifestText(): Promise<ManifestFetchOutcome> {
 export async function fetchAlbumManifestOrThrow(): Promise<unknown> {
   const out = await loadManifestText();
   if (out.status === "http-error") {
+    // 空桶尚无清单；访客按空相册展示，首次上传会创建真实清单。
+    if (out.httpStatus === 404) {
+      return normalizeAlbumManifestPayload({ schemaVersion: 1, assets: [] });
+    }
     throw new Error(`加载 manifest 失败：HTTP ${out.httpStatus}。请求：${out.label}`);
   }
   return normalizeAlbumManifestPayload(parseManifestJsonText(out.text, out.label));
