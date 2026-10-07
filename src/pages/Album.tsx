@@ -8,7 +8,7 @@ import { checkAssetAccess, filterAccessibleAssets } from "@/lib/albumAccess";
 import {
   blobCacheObjectKey,
   getAuthorizedCachedBlobUrl,
-  putAlbumBlobUrl,
+  loadAlbumBlobUrlOnce,
   removeAlbumBlobUrl,
   sessionFingerprint,
   syncAlbumBlobCacheToSession,
@@ -263,7 +263,12 @@ async function fetchAsBlobUrl(asset: AlbumAsset, signedUrl: string, mimeFallback
   // 有些浏览器/环境下 blob.type 可能为空，这里强制补齐 mime
   const fixedBlob = blob.type ? blob : new Blob([blob], { type: mime });
   // 明文对象：完全没有加密，也没有任何密钥参与
-  return { objectUrl: URL.createObjectURL(fixedBlob), meta: { ...meta, encrypted: false } };
+  return {
+    objectUrl: URL.createObjectURL(fixedBlob),
+    meta: { ...meta, encrypted: false },
+    // 缓存按**明文字节数**封顶，所以体积要一路带上去
+    bytes: fixedBlob.size,
+  };
 }
 
 async function fetchCipherBlobUrl(
@@ -298,6 +303,8 @@ async function fetchCipherBlobUrl(
   return {
     objectUrl: URL.createObjectURL(blob),
     meta: { ...meta, encrypted: true, decryptKeyFp: await keyFingerprintB64(zoneKeyB64) },
+    // 缓存按**明文字节数**封顶，所以体积要一路带上去
+    bytes: blob.size,
   };
 }
 
@@ -343,9 +350,11 @@ function useAssetImageUrl(
       return;
     }
 
-    // 3) 先拿签名 URL，再 fetch 成 blob，最后转成 ObjectURL 给 <img>
+    // 3) miss 才真正取图。交给 loadAlbumBlobUrlOnce：
+    //    · 同一张图的并发挂载（网格卡片 + 灯箱大图）共享一次请求，不会把 3 MB 的密文下两遍；
+    //    · 由它统一写缓存，于是「一个对象键 = 一个 Blob URL」，不会出现旧 URL 没人回收的泄漏。
     setUrl(undefined);
-    const run = async () => {
+    void loadAlbumBlobUrlOnce(objectKey, async () => {
       if (file) {
         const signed = await fetchSignedUrlForOssObject(file);
         if (!signed) throw new Error(i18n.t("album.errSignUrl"));
@@ -374,16 +383,11 @@ function useAssetImageUrl(
         aadJson,
         asset.mime || asset.aad?.mime || undefined,
       );
-    };
-
-    void run()
+    })
       .then(({ objectUrl, meta }) => {
-        if (cancelled) {
-          if (objectUrl) URL.revokeObjectURL(objectUrl);
-          return;
-        }
-
-        putAlbumBlobUrl(objectKey, objectUrl, meta);
+        // 这里**不能**在 cancelled 时 revoke：结果已经归缓存所有，
+        // 同一张图可能还有别的组件在用它（早先各调用方自己 put 时才有那个泄漏）。
+        if (cancelled) return;
         setUrl(objectUrl);
         if (meta) onResolvedMetadata?.(asset.assetId, meta);
       })

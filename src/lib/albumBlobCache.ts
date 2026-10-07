@@ -15,12 +15,46 @@ export type CachedAssetMeta = {
 type BlobUrlCacheEntry = {
   objectUrl: string;
   meta?: CachedAssetMeta;
+  /** 明文体积（字节）。缓存里存的是**解密后的明文**，所以内存占用就是它 */
+  bytes: number;
   createdAt: number;
   lastUsedAt: number;
 };
 
-/** 控制内存：最多缓存 N 张解码后的 Blob URL（不影响 UI，只影响性能/内存） */
+/** 取图结果（带明文体积，供字节闸门统计） */
+export type LoadedAlbumBlob = {
+  objectUrl: string;
+  meta?: CachedAssetMeta;
+  bytes: number;
+};
+
+/**
+ * 缓存上限：两道闸门同时生效。
+ *
+ * - `BLOB_URL_CACHE_MAX`：条数，兜底；
+ * - `BLOB_BYTES_MAX`：**字节数，主约束**。
+ *
+ * 为什么必须有字节闸门：这里缓存的是**解密后的明文**，而 VRChat 截图动辄 2–10 MB。
+ * 早先只按「180 张」封顶，而线上当时的相册是 157 张共 466 MB（平均 2.97 MB/张）——
+ * 也就是滚完一遍就是 ~500 MB 常驻内存，移动端很容易被系统直接杀掉标签页。
+ * 条数上限看起来在"控制内存"，其实控制不了内存。
+ */
 const BLOB_URL_CACHE_MAX = 180;
+const BLOB_BYTES_MAX = 128 * 1024 * 1024;
+
+/** 当前缓存占用的明文总字节数（淘汰依据，也供排查用） */
+let totalBytes = 0;
+
+/**
+ * 缓存代次：会话变化时 +1。
+ * 用来作废**正在进行中**的取图 —— 若在下载/解密途中换了会话，
+ * 那份明文属于上一个会话，绝不能落进新会话的缓存。
+ */
+let cacheEpoch = 0;
+
+/** 正在进行中的取图，按对象键共享（见 loadAlbumBlobUrlOnce） */
+const inFlight = new Map<string, { id: number; promise: Promise<LoadedAlbumBlob> }>();
+let inFlightSeq = 0;
 
 /**
  * 解密后图片的 Blob URL 缓存。
@@ -81,6 +115,10 @@ export function syncAlbumBlobCacheToSession(fingerprint: string): void {
 export function clearAlbumBlobCache(nextFingerprint: string | null = null): void {
   for (const entry of cache.values()) safeRevoke(entry.objectUrl);
   cache.clear();
+  totalBytes = 0;
+  // 代次 +1：让进行中的取图作废，否则它完成时会把上一个会话的明文写进新会话的缓存
+  cacheEpoch++;
+  inFlight.clear();
   cacheFingerprint = nextFingerprint;
 }
 
@@ -104,26 +142,108 @@ export function getAuthorizedCachedBlobUrl(
   return { objectUrl: entry.objectUrl, meta: entry.meta };
 }
 
+/**
+ * 写入缓存。
+ *
+ * ⚠️ 页面代码**不要直接调用它** —— 用 `loadAlbumBlobUrlOnce`。那里做了并发去重，
+ * 并保证「一个对象键只对应一个 Blob URL、且由缓存负责 revoke」。
+ * 保留导出是给测试与既有调用点用的。
+ *
+ * @param bytes 明文体积。不传按 0 计（假 URL 无体积可算）——只会让字节闸门少算一点，
+ *              不影响正确性。
+ */
 export function putAlbumBlobUrl(
   objectKey: string,
   objectUrl: string,
   meta?: CachedAssetMeta,
+  bytes = 0,
 ): void {
-  if (!objectKey) return;
-  cache.set(objectKey, { objectUrl, meta, createdAt: Date.now(), lastUsedAt: Date.now() });
+  const key = objectKey.trim();
+  if (!key) return;
+
+  const previous = cache.get(key);
+  if (previous) {
+    // 同键重复写入：旧 URL 已经没人引用了，必须回收，否则就是泄漏
+    safeRevoke(previous.objectUrl);
+    totalBytes -= previous.bytes;
+  }
+
+  const size = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  cache.set(key, { objectUrl, meta, bytes: size, createdAt: Date.now(), lastUsedAt: Date.now() });
+  totalBytes += size;
   evictIfNeeded();
 }
 
-/** 按最久未使用淘汰，避免长列表把内存吃满 */
+/** 按最久未使用淘汰，直到同时满足条数与字节两道闸门 */
 function evictIfNeeded(): void {
-  if (cache.size <= BLOB_URL_CACHE_MAX) return;
+  if (cache.size <= BLOB_URL_CACHE_MAX && totalBytes <= BLOB_BYTES_MAX) return;
+
   const items = [...cache.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
-  const removeCount = Math.max(1, cache.size - BLOB_URL_CACHE_MAX);
-  for (let i = 0; i < removeCount; i++) {
-    const [key, entry] = items[i];
+  for (const [key, entry] of items) {
+    // 永远保留最后写入的那一条：单张就超过字节上限时（例如一张 200 MB 的图），
+    // 若把它也淘汰掉，就成了"存进去立刻被扔掉"的无限重下循环。
+    if (cache.size <= 1) break;
+    if (cache.size <= BLOB_URL_CACHE_MAX && totalBytes <= BLOB_BYTES_MAX) break;
     safeRevoke(entry.objectUrl);
     cache.delete(key);
+    totalBytes -= entry.bytes;
   }
+  if (totalBytes < 0) totalBytes = 0;
+}
+
+/**
+ * **取图的唯一入口**：先查缓存，miss 就把 `producer` 跑一次并写进缓存；
+ * 同一个对象键的并发调用共享同一个 Promise。
+ *
+ * 由它统一负责两件事：
+ *
+ * 1. **并发去重**。同一张图可能同时挂在网格卡片与灯箱大图里，两边查缓存都是 miss。
+ *    不去重就会签名两次、把整张密文（平均 3 MB）下载两遍。
+ * 2. **只有一个写入者**。于是同一个对象键永远只对应一个 Blob URL，且由缓存持有、
+ *    由缓存负责 revoke。早先由各调用方自己 put，后完成的会覆盖前一条，
+ *    先完成那条的 URL 就再也没人回收，泄漏到页面关闭。
+ *
+ * ⚠️ 调用方**必须先过 `checkAssetAccess`**：本函数只认缓存、不认权限。
+ * 顺序反过来，就是那个"用管理员密钥看过的私密照片，换成公开区密钥后仍从缓存显示"的漏洞。
+ */
+export function loadAlbumBlobUrlOnce(
+  objectKey: string,
+  producer: () => Promise<{ objectUrl: string; meta?: CachedAssetMeta; bytes?: number }>,
+): Promise<LoadedAlbumBlob> {
+  const key = objectKey.trim();
+  if (!key) return Promise.reject(new Error("缺少对象键，无法取图"));
+
+  const cached = cache.get(key);
+  if (cached) {
+    cached.lastUsedAt = Date.now();
+    return Promise.resolve({ objectUrl: cached.objectUrl, meta: cached.meta, bytes: cached.bytes });
+  }
+
+  const pending = inFlight.get(key);
+  if (pending) return pending.promise;
+
+  const id = ++inFlightSeq;
+  const epoch = cacheEpoch;
+  const promise: Promise<LoadedAlbumBlob> = producer().then((result) => {
+    if (epoch !== cacheEpoch) {
+      // 途中会话变了：这份明文属于上一个会话，回收掉、也不要写进缓存
+      safeRevoke(result.objectUrl);
+      throw new Error("会话已变化，本次取图结果已作废");
+    }
+    const bytes = Number(result.bytes) > 0 ? Number(result.bytes) : 0;
+    putAlbumBlobUrl(key, result.objectUrl, result.meta, bytes);
+    return { objectUrl: result.objectUrl, meta: result.meta, bytes };
+  });
+
+  inFlight.set(key, { id, promise });
+  const cleanup = () => {
+    // 只清理自己那一份，别把后来者的任务误删（例如中途换过会话）
+    const current = inFlight.get(key);
+    if (current?.id === id) inFlight.delete(key);
+  };
+  void promise.then(cleanup, cleanup);
+
+  return promise;
 }
 
 /**
@@ -137,9 +257,21 @@ export function removeAlbumBlobUrl(objectKey: string): void {
   if (!entry) return;
   safeRevoke(entry.objectUrl);
   cache.delete(key);
+  totalBytes -= entry.bytes;
+  if (totalBytes < 0) totalBytes = 0;
 }
 
 /** 仅供测试与排查：当前缓存条数 */
 export function albumBlobCacheSize(): number {
   return cache.size;
+}
+
+/** 仅供测试与排查：当前缓存的明文总字节数 */
+export function albumBlobCacheBytes(): number {
+  return totalBytes;
+}
+
+/** 仅供测试与排查：正在进行中的取图数量 */
+export function albumBlobInFlightCount(): number {
+  return inFlight.size;
 }
