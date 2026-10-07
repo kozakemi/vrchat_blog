@@ -11,8 +11,10 @@
 ### 当前功能
 
 - **单一入口**：站点只有登录页。可「密钥登录」（导入密钥文件）或「注册」（现场生成并下载密钥文件，需自行保存）。
-- **加密相册**：按时间倒序、或按 WorldID 分组浏览；点开可看大图与拍摄信息。
+- **加密相册**：按时间倒序、或按 WorldID 分组浏览；点开可看大图、拍摄信息，并可下载。
 - **相册管理**（仅管理员密钥可见）：本地加密后上传 OSS，创建与管理 Zone。
+- **删除照片**（仅管理员，在大图里操作）：先从清单移除、再删除 OSS 密文，**不可恢复**；
+  顺序不可颠倒，否则会在清单里留下指向缺失对象的悬空引用。
 - **多语言**：中文 / 日本語 / English。
 - **移动端适配**：响应式布局，支持不同设备访问。
 
@@ -30,17 +32,23 @@
 - **分支**：`main`
 - **自动构建**：每次 push 到 main 分支时自动触发构建与部署。
 
-### 相册上传检查
+### 相册上传 / 删除检查
 
-上传使用浏览器直连 OSS。桶的 CORS 必须允许 `https://vrchat.kozakemi.top` 的 `PUT`
-及 `Content-Type` 请求头；只允许 `GET` 时，读取相册正常但上传预检会返回 403。
+上传与删除都使用浏览器直连 OSS。桶的 CORS 必须允许 `https://vrchat.kozakemi.top` 的
+**`PUT` 与 `DELETE`** 及 `Content-Type` 请求头：
+
+- 只允许 `GET` 时，读取相册正常，但**上传**预检返回 403；
+- 只放行 `GET`/`PUT` 时，能上传、能浏览，但**删除**预检返回 403（"删不掉"，且页面上只表现为请求失败）。
+
 GitHub Actions 只部署静态页面，不会更新 OSS CORS。
 
-- `node tools/oss-upload-cors.mjs`：读取配置并检查线上 PUT 预检。
-- `node tools/oss-upload-cors.mjs --apply`：先备份到已忽略的 `keys/`，保留原规则，补充站点上传规则。
+- `node tools/oss-upload-cors.mjs`：读取配置并逐项检查线上 `PUT` / `DELETE` 预检。
+- `node tools/oss-upload-cors.mjs --apply`：先备份到已忽略的 `keys/`，保留原规则，补齐缺失的方法。
 - `node tools/album-upload-smoke.mjs --confirm-write`：实际测试加密、上传、清单合并、回读、解密，再还原清单并清理测试对象。测试期间避免其他管理员同时上传。
 - `npm run test:album-access`：Zone 权限判定与解密缓存隔离（不联网）。覆盖「私有区照片不得因缓存而对无权身份可见」。
 - `npm run test:image-size`：图片文件头尺寸解析（PNG / GIF / JPEG / WebP）。
+- `npm run test:album-delete`：删除照片的顺序与异常路径（内存 OSS 桩）。锁死「先改清单、后删密文」，
+  以及删除失败时只留孤儿对象、绝不留下悬空引用。
 
 脚本使用本机 `keys/oss.json`，冒烟测试另需 `keys/kozakemi.admin.json`。
 管理页可导入 OSS JSON 文件，也可粘贴后保存；凭据仅保存在当前标签页会话中，勿提交到仓库或构建产物。

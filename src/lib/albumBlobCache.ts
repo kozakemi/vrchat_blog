@@ -126,6 +126,19 @@ function evictIfNeeded(): void {
   }
 }
 
+/**
+ * 丢弃单个对象的缓存。
+ * 删除照片后必须调用：否则已解密的明文会继续留在内存里，
+ * 万一之后又写入同键对象（例如重新上传），可能显示上一份内容。
+ */
+export function removeAlbumBlobUrl(objectKey: string): void {
+  const key = objectKey.trim();
+  const entry = cache.get(key);
+  if (!entry) return;
+  safeRevoke(entry.objectUrl);
+  cache.delete(key);
+}
+
 /** 仅供测试与排查：当前缓存条数 */
 export function albumBlobCacheSize(): number {
   return cache.size;

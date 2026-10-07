@@ -13,7 +13,8 @@
     "album:admin-key": "node tools/generate-admin-key.mjs",
     "test:album-empty": "node tools/album-empty-storage-test.mjs",
     "test:album-access": "node tools/album-access-test.mjs",
-    "test:image-size": "node tools/image-size-test.mjs"
+    "test:image-size": "node tools/image-size-test.mjs",
+    "test:album-delete": "node tools/album-delete-test.mjs"
   },
   "dependencies": {
     "@fontsource/nunito": "^5.2.7",

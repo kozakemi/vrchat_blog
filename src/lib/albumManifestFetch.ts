@@ -131,6 +131,53 @@ export function buildMergedManifest(
   return { doc, previousCount, mergedCount: byId.size };
 }
 
+export type ManifestRemovalResult = {
+  /** 可直接 JSON.stringify 写回 OSS 的完整顶层对象 */
+  doc: Record<string, unknown>;
+  /** 实际移除了多少条（assetId 已不在清单里时为 0） */
+  removedCount: number;
+  /** 移除后剩余条目数 */
+  remainingCount: number;
+};
+
+/**
+ * 从清单里移除指定 assetId —— 纯函数，与 buildMergedManifest 一样可被测试直接调用。
+ *
+ * 行为约定：
+ * - 顶层额外字段（assetsBasePath 等）原样保留；
+ * - **assetId 缺失或非字符串的条目一律保留**——宁可不删，也不要因为字段异常误删数据；
+ * - 找不到目标 id 时返回 removedCount = 0，由调用方决定是否继续删对象（"彻底删除"应保持幂等）。
+ */
+export function buildManifestWithoutAssets(
+  existing: ExistingManifestForMerge,
+  assetIdsToRemove: Iterable<string>,
+  generatedAt: string,
+): ManifestRemovalResult {
+  const payload = existing.status === "ok" ? existing.payload : null;
+  const extra = payload ? payload.extra : {};
+  const drop = new Set(assetIdsToRemove);
+  const all = payload?.assets ?? [];
+
+  const kept = all.filter((a) => {
+    const id = (a as { assetId?: unknown } | null)?.assetId;
+    if (typeof id !== "string") return true;
+    return !drop.has(id);
+  });
+
+  const assetsBasePath =
+    typeof extra.assetsBasePath === "string" ? (extra.assetsBasePath as string) : "/albums/";
+
+  const doc: Record<string, unknown> = {
+    ...extra,
+    schemaVersion: payload?.schemaVersion ?? 1,
+    generatedAt,
+    assetsBasePath,
+    assets: kept,
+  };
+
+  return { doc, removedCount: all.length - kept.length, remainingCount: kept.length };
+}
+
 function parseManifestJsonText(text: string, requestLabel: string): unknown {
   const lead = text.trimStart().slice(0, 120).toLowerCase();
   if (lead.startsWith("<!doctype") || lead.startsWith("<html") || lead.startsWith("<!")) {

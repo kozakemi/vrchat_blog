@@ -1,5 +1,5 @@
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
-import { getPutPresignedUrlWithConfig } from "@/lib/ossClientPresign";
+import { getDeletePresignedUrlWithConfig, getPutPresignedUrlWithConfig } from "@/lib/ossClientPresign";
 import type { OssUploadConfig } from "@/lib/ossTypes";
 import { ossBucketPublicOrigin, resolveSignedUrlToAbsolute } from "@/lib/ossSignedUrl";
 
@@ -60,4 +60,60 @@ export async function putObjectWithSignedUrl(
         : "";
     throw new Error(`上传失败：HTTP ${res.status} ${res.statusText}${hint}`);
   }
+}
+
+/**
+ * 生成 DELETE 预签名 URL（与 PUT 同理：只能靠浏览器内的 OSS 配置签名）。
+ *
+ * OSS 的签名串包含 HTTP 方法，因此删除必须有独立的 DELETE 签名，
+ * 拿 PUT/GET 的签名去删只会得到 403。
+ */
+export async function resolveDeleteSignedUrl(
+  objectKey: string,
+  clientConfig: OssUploadConfig | null,
+  expiresSec = 900,
+): Promise<string> {
+  if (!clientConfig) {
+    throw new Error(
+      `未配置 OSS 凭据，无法为「${objectKey}」生成删除签名：` +
+        "请在管理页「OSS 上传配置」中填写 AccessKey JSON 并保存（签名服务只提供 GET 签名，不能替代）",
+    );
+  }
+  const origin = ossBucketPublicOrigin(clientConfig.oss_bucket_name, clientConfig.oss_endpoint);
+  const url = await getDeletePresignedUrlWithConfig(objectKey, clientConfig, expiresSec);
+  return resolveSignedUrlToAbsolute(url, origin);
+}
+
+/**
+ * 用 DELETE 预签名删除 OSS 对象。
+ *
+ * - 404 视为成功（对象本就不在，"彻底删除"应当幂等）；
+ * - 预检被拒时浏览器只抛网络错误，读不到 OSS 的 XML 正文，因此这里给出明确的 CORS 指引。
+ */
+export async function deleteObjectWithSignedUrl(
+  deleteUrl: string,
+): Promise<{ alreadyGone: boolean }> {
+  const fetchUrl = rewriteOssUrlForDevFetch(resolveSignedUrlToAbsolute(deleteUrl));
+  let res: Response;
+  try {
+    res = await fetch(fetchUrl, {
+      method: "DELETE",
+      mode: "cors",
+      referrerPolicy: "strict-origin-when-cross-origin",
+    });
+  } catch {
+    throw new Error(
+      "删除请求未收到可读响应：请检查网络，以及 OSS 桶的 CORS 是否允许当前站点的 DELETE 方法。" +
+        "只放行 GET/PUT 时会出现「能上传、能浏览，但删不掉」。可用 node tools/oss-upload-cors.mjs --apply 补齐。",
+    );
+  }
+  if (res.status === 404) return { alreadyGone: true };
+  if (!res.ok) {
+    const hint =
+      res.status === 403
+        ? "（403：多为桶 CORS 未放行 DELETE，或签名方法与请求方法不一致）"
+        : "";
+    throw new Error(`删除失败：HTTP ${res.status} ${res.statusText}${hint}`);
+  }
+  return { alreadyGone: false };
 }

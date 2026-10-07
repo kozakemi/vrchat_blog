@@ -5,16 +5,19 @@ import {
   blobCacheObjectKey,
   getAuthorizedCachedBlobUrl,
   putAlbumBlobUrl,
+  removeAlbumBlobUrl,
   sessionFingerprint,
   syncAlbumBlobCacheToSession,
 } from "@/lib/albumBlobCache";
 import { base64ToBytes, buildAadJson, importAesGcmKey } from "@/lib/albumCrypto";
+import { deleteAlbumAsset } from "@/lib/albumDelete";
 import { fetchAlbumManifestOrThrow } from "@/lib/albumManifestFetch";
 import { readImageSize, readU32BE } from "@/lib/imageSize";
 import { rewriteOssUrlForDevFetch } from "@/lib/ossDevProxy";
 import { fetchSignedUrlForOssObject, invalidateSignedUrlCacheForObjectKey } from "@/lib/ossSignFetch";
+import { loadOssConfigFromSession } from "@/lib/ossUploadConfig";
 import { cn } from "@/lib/utils";
-import { AlertCircle, Download } from "lucide-react";
+import { AlertCircle, Download, Trash2 } from "lucide-react";
 import { useSessionAuthStore } from "@/store/sessionAuthStore";
 
 type AlbumViewMode = "time" | "world";
@@ -402,6 +405,13 @@ export default function Album() {
   /** 大图当前的 Blob URL，供「下载」使用；换图或关闭灯箱时清空 */
   const [activeBlobUrl, setActiveBlobUrl] = useState<string | undefined>(undefined);
 
+  // 管理员删除（仅 isAdmin 可见）：deleteTarget 非空即弹出确认框
+  const [deleteTarget, setDeleteTarget] = useState<AlbumAsset | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  /** 非空表示"部分成功"，确认框改为只展示说明 */
+  const [deleteResult, setDeleteResult] = useState<string | null>(null);
+
   // 轻量提示（复制到剪贴板）
   const [toast, setToast] = useState<string | null>(null);
 
@@ -599,6 +609,55 @@ export default function Album() {
 
   /** 只有 blob: URL 才能可靠地"另存为"；跨域的 src 兜底会被浏览器忽略 download */
   const canDownloadActive = Boolean(activeBlobUrl?.startsWith("blob:"));
+
+  /** 删除后重新拉取清单（保留已解析的元数据与当前分页位置，只更新条目） */
+  async function refetchManifest() {
+    try {
+      const data = await fetchAlbumManifestOrThrow();
+      setManifest(data as AlbumManifest);
+    } catch (e) {
+      console.warn("[album] 删除后重新加载清单失败:", e);
+    }
+  }
+
+  /**
+   * 确认删除：先从清单移除，再删 OSS 密文（顺序由 deleteAlbumAsset 保证）。
+   * 这是不可恢复操作，所以必须由使用者显式确认后才调用。
+   */
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    const cfg = loadOssConfigFromSession();
+    if (!cfg) {
+      setDeleteError("需要先在「相册管理」页保存 OSS 上传配置，删除请求才能签名。");
+      return;
+    }
+
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const objectKey = deleteTarget.cipherFile?.trim() || deleteTarget.file?.trim() || "";
+      const report = await deleteAlbumAsset(cfg, deleteTarget);
+
+      // 立刻丢掉已解密的明文，避免它继续留在内存里
+      if (objectKey) removeAlbumBlobUrl(objectKey);
+
+      if (report.warning) {
+        // 部分成功：留在弹窗里展示，别用 1.6 秒就消失的 toast
+        setDeleteResult(report.warning);
+        await refetchManifest();
+        return;
+      }
+
+      setDeleteTarget(null);
+      setActiveIndex(null);
+      await refetchManifest();
+      setToast(report.objectAlreadyGone ? "这张照片已删除（密文此前已不存在）" : "已删除这张照片");
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   /** 下载当前大图：直接复用已解密并展示中的 Blob URL，不重新下载 */
   function downloadActiveImage() {
@@ -946,6 +1005,24 @@ export default function Album() {
                     更多
                   </span>
                 </button>
+                {keySession?.isAdmin ? (
+                  <button
+                    type="button"
+                    className="rounded-xl border border-red-400/40 bg-red-500/15 px-3 py-2 text-xs font-extrabold text-red-100 hover:bg-red-500/25"
+                    title="删除这张照片（不可恢复）"
+                    aria-label="删除照片"
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleteResult(null);
+                      setDeleteTarget(active);
+                    }}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      删除
+                    </span>
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10"
@@ -1008,6 +1085,83 @@ export default function Album() {
                 onBlobUrlChange={setActiveBlobUrl}
               />
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="删除照片"
+          onClick={() => {
+            if (deleting) return;
+            setDeleteTarget(null);
+            setDeleteResult(null);
+            setDeleteError(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-red-400/30 bg-zinc-900/95 p-4 text-sm text-white/90 shadow-[0_18px_60px_rgba(0,0,0,0.5)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {deleteResult ? (
+              <>
+                <div className="text-sm font-extrabold text-amber-200">删除未完全完成</div>
+                <p className="mt-2 text-xs leading-relaxed text-white/75">{deleteResult}</p>
+                <div className="mt-4 flex justify-end">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10"
+                    onClick={() => {
+                      setDeleteTarget(null);
+                      setDeleteResult(null);
+                    }}
+                  >
+                    关闭
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-sm font-extrabold text-red-100">确认删除这张照片？</div>
+                <p className="mt-2 break-all text-xs text-white/70">
+                  {downloadFilename(deleteTarget)}
+                </p>
+                <p className="mt-3 text-xs leading-relaxed text-amber-200/90">
+                  会同时删除 OSS 上的密文文件，
+                  <strong className="text-amber-100">删除后无法恢复</strong>
+                  （存储桶未开启版本控制）。请确认没有其他地方还需要它。
+                </p>
+                {deleteError ? (
+                  <p className="mt-3 rounded-lg border border-rose-400/30 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-100">
+                    {deleteError}
+                  </p>
+                ) : null}
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-xs font-extrabold text-white/85 hover:bg-white/10 disabled:opacity-40"
+                    onClick={() => {
+                      setDeleteTarget(null);
+                      setDeleteError(null);
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    className="rounded-xl border border-red-400/50 bg-red-500/30 px-4 py-2 text-xs font-extrabold text-red-50 hover:bg-red-500/40 disabled:opacity-40"
+                    onClick={() => void confirmDelete()}
+                  >
+                    {deleting ? "正在删除…" : "确认删除"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       ) : null}
